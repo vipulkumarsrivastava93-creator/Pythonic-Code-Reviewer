@@ -89,6 +89,34 @@ report per file.
 
 ---
 
+## Suppressing findings with `# noqa`
+
+Sometimes a finding is a deliberate exception — a pattern you know is fine in context. You can
+suppress it with a `# noqa` comment on the offending line, Ruff/Flake8-style:
+
+```python
+def f(xs):
+    if xs == None:  # noqa: PY007 - deliberate: sentinel check on legacy API
+        pass
+```
+
+Two forms are supported:
+
+| Form | Effect |
+|---|---|
+| `# noqa` | Suppresses **all** findings on that line |
+| `# noqa: PY007, DES003` | Suppresses **only** the listed rule ids on that line |
+
+Notes:
+
+- Suppression is **line-scoped** — a `# noqa` only affects findings reported on that exact line.
+- Trailing explanation text after the codes is allowed (e.g. `# noqa: PY007 - reason`), matching
+  Ruff/Flake8 behavior.
+- Use it sparingly: prefer fixing the underlying issue. `# noqa` is meant for cases that genuinely
+  can't be rectified (or where the finding is a false positive for your context).
+
+---
+
 ## Roadmap: on-device LLM review (planned)
 
 The static analyzers are instant and offline. The longer-term plan is to add a **small local

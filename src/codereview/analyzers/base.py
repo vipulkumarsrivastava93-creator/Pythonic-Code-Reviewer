@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import abc
 import ast
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from codereview.report import Issue
 from codereview.rules import Rule
@@ -57,7 +57,31 @@ class WalkDetector(Detector):
         """Return issues for a single node."""
 
 
-class VisitorDetector(Detector):
+class _WorkerDetector(Detector):
+    """Shared `detect()` for detectors that delegate to a per-tree worker.
+
+    A worker is an object that collects issues into `worker.issues` and is
+    driven by a single entry method (`visit` for visitors, `scan` for
+    scanners). Subclasses implement `_make_worker()` (factory) and `_run()`
+    (how to drive the worker over a tree). `detect()` creates a fresh worker
+    per tree so state never leaks between calls.
+    """
+
+    @abc.abstractmethod
+    def _make_worker(self) -> Any:
+        """Return a fresh worker for one tree."""
+
+    @abc.abstractmethod
+    def _run(self, worker: Any, tree: ast.AST) -> None:
+        """Drive `worker` over `tree`."""
+
+    def detect(self, tree: ast.AST) -> list[Issue]:
+        worker = self._make_worker()
+        self._run(worker, tree)
+        return worker.issues
+
+
+class VisitorDetector(_WorkerDetector):
     """Detector that traverses with a stateful `ast.NodeVisitor`.
 
     **What it checks:** nodes that need *accumulated state* to judge — e.g.
@@ -69,21 +93,21 @@ class VisitorDetector(Detector):
 
     **Why:** `NodeVisitor` gives depth-first, in-order traversal with mutable
     state, which is needed when a node's meaning depends on what came before
-    it. `detect()` creates a fresh visitor per tree so state never leaks
-    between calls.
+    it.
     """
 
-    def detect(self, tree: ast.AST) -> list[Issue]:
-        visitor = self._make_visitor()
-        visitor.visit(tree)
-        return visitor.issues
+    def _make_worker(self) -> Any:
+        return self._make_visitor()
+
+    def _run(self, worker: Any, tree: ast.AST) -> None:
+        worker.visit(tree)
 
     @abc.abstractmethod
     def _make_visitor(self) -> "ast.NodeVisitor":
         """Return a fresh visitor for one tree."""
 
 
-class ScannerDetector(Detector):
+class ScannerDetector(_WorkerDetector):
     """Detector that needs custom traversal (sibling/ancestor context).
 
     **What it checks:** patterns that `ast.walk` and `NodeVisitor` cannot
@@ -96,15 +120,15 @@ class ScannerDetector(Detector):
 
     **Why:** some rules need sibling or ancestor context that the standard
     traversals hide. A hand-written `scan()` gives full control over the walk
-    while keeping the `detect()` entry point uniform. `detect()` creates a
-    fresh scanner per tree.
+    while keeping the `detect()` entry point uniform.
     """
 
-    def detect(self, tree: ast.AST) -> list[Issue]:
-        scanner = self._make_scanner()
-        scanner.scan(tree)
-        return scanner.issues
+    def _make_worker(self) -> Any:
+        return self._make_scanner()
+
+    def _run(self, worker: Any, tree: ast.AST) -> None:
+        worker.scan(tree)
 
     @abc.abstractmethod
-    def _make_scanner(self) -> "ScannerDetector":
+    def _make_scanner(self) -> Any:
         """Return a fresh scanner for one tree."""

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from codereview.analyzers.base import Detector
+from codereview.analyzers.detectors.duplicated_block import DuplicatedBlock
+from codereview.analyzers.detectors.duplicated_method import DuplicatedMethod
 from codereview.analyzers.detectors.excessive_nesting import ExcessiveNesting
+from codereview.analyzers.detectors.large_class import LargeClass
+from codereview.analyzers.detectors.many_init_params import ManyInitParams
 from codereview.analyzers.detectors.nested_function import NestedFunction
 from codereview.analyzers.detectors.prefer_any_all import PreferAnyAll
 from codereview.analyzers.detectors.prefer_dataclass import PreferDataclass
@@ -21,6 +25,7 @@ from codereview.analyzers.detectors.prefer_str_join import PreferStrJoin
 from codereview.analyzers.detectors.prefer_top_level_imports import PreferTopLevelImports
 from codereview.analyzers.detectors.prefer_with_open import PreferWithOpen
 from codereview.analyzers.detectors.prefer_zip import PreferZip
+from codereview.analyzers.detectors.unused_instance_attribute import UnusedInstanceAttribute
 
 REGISTRY: list[Detector] = [
     PreferListComprehension(),
@@ -41,6 +46,11 @@ REGISTRY: list[Detector] = [
     ExcessiveNesting(),
     NestedFunction(),
     PreferTopLevelImports(),
+    LargeClass(),
+    ManyInitParams(),
+    DuplicatedBlock(),
+    DuplicatedMethod(),
+    UnusedInstanceAttribute(),
 ]
 
 __all__ = ["REGISTRY"]

@@ -5,7 +5,7 @@ from codereview.rules import RULES, Rule, get
 
 
 def test_registry_has_expected_number_of_rules():
-    assert len(RULES) == 22
+    assert len(RULES) == 23
 
 
 def test_rule_ids_unique():

@@ -130,10 +130,17 @@ DES006 = Rule("DES006", "nested_function", Category.DESIGN, Severity.SUGGESTION,
               guard="Skips idiomatic closures: decorated functions and functions that are "
                     "passed as callbacks/arguments to other calls.")
 
+DES007 = Rule("DES007", "unused_instance_attribute", Category.DESIGN, Severity.SUGGESTION,
+              "Unused instance attribute",
+              "Instance attribute is assigned in __init__ but never read. Remove it or use it.",
+              guard="Skips dataclasses (fields are data), pure data-holder classes (no "
+                    "methods to read them), and write-only attributes like caches "
+                    "(_cache/_lazy/_memo prefixes).")
+
 
 RULES: dict[str, Rule] = {r.code: r for r in (
     PY001, PY002, PY003, PY004, PY005, PY006, PY007, PY008, PY009, PY010, PY011, PY012,
-    PY013, PY014, PY015, PY016, DES001, DES002, DES003, DES004, DES005, DES006)}
+    PY013, PY014, PY015, PY016, DES001, DES002, DES003, DES004, DES005, DES006, DES007)}
 
 
 def get(code: str) -> Rule:

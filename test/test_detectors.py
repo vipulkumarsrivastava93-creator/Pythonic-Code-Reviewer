@@ -2,7 +2,11 @@ import ast
 
 from codereview import analyze
 from codereview.analyzers.detectors import REGISTRY
+from codereview.analyzers.detectors.duplicated_block import DuplicatedBlock
+from codereview.analyzers.detectors.duplicated_method import DuplicatedMethod
 from codereview.analyzers.detectors.excessive_nesting import ExcessiveNesting
+from codereview.analyzers.detectors.large_class import LargeClass
+from codereview.analyzers.detectors.many_init_params import ManyInitParams
 from codereview.analyzers.detectors.nested_function import NestedFunction
 from codereview.analyzers.detectors.prefer_any_all import PreferAnyAll
 from codereview.analyzers.detectors.prefer_dataclass import PreferDataclass
@@ -20,6 +24,7 @@ from codereview.analyzers.detectors.prefer_str_join import PreferStrJoin
 from codereview.analyzers.detectors.prefer_top_level_imports import PreferTopLevelImports
 from codereview.analyzers.detectors.prefer_with_open import PreferWithOpen
 from codereview.analyzers.detectors.prefer_zip import PreferZip
+from codereview.analyzers.detectors.unused_instance_attribute import UnusedInstanceAttribute
 from codereview.report import Category, Severity
 
 
@@ -180,7 +185,7 @@ def build(items):
 
 
 def test_registry_contains_all_detectors():
-    assert len(REGISTRY) == 18
+    assert len(REGISTRY) == 23
     assert {type(d) for d in REGISTRY} == {
         PreferListComprehension,
         PreferEnumerate,
@@ -200,6 +205,11 @@ def test_registry_contains_all_detectors():
         ExcessiveNesting,
         NestedFunction,
         PreferTopLevelImports,
+        LargeClass,
+        ManyInitParams,
+        DuplicatedBlock,
+        DuplicatedMethod,
+        UnusedInstanceAttribute,
     }
 
 
