@@ -194,3 +194,97 @@ def test_display_shows_culprit_line(capsys):
     display(report)
     out = capsys.readouterr().out
     assert "if x == None:" in out
+
+
+# ---- --setup flag ----
+
+def test_main_setup_no_path_needed(monkeypatch, capsys):
+    """`codereview --setup` installs the model without requiring a path."""
+    calls = []
+    monkeypatch.setattr("codereview.cli.ensure_model",
+                        lambda **kw: calls.append(kw))
+    rc = main(["--setup"])
+    assert rc == 0
+    assert calls == [{"yes": False, "force_menu": True,
+                      "announce": calls[0]["announce"]}]
+    assert "Setup complete" in capsys.readouterr().out
+
+
+def test_main_setup_yes_flag(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr("codereview.cli.ensure_model",
+                        lambda **kw: calls.append(kw))
+    rc = main(["--setup", "--yes"])
+    assert rc == 0
+    assert calls == [{"yes": True, "force_menu": True,
+                      "announce": calls[0]["announce"]}]
+
+
+def test_main_setup_declined_returns_1(monkeypatch, capsys):
+    from codereview.llm import ModelInstallError
+    def decline(**kw):
+        raise ModelInstallError("declined")
+    monkeypatch.setattr("codereview.cli.ensure_model", decline)
+    rc = main(["--setup"])
+    assert rc == 1
+    assert "Setup incomplete" in capsys.readouterr().err
+
+
+def test_main_no_path_prints_error(capsys):
+    """No path and no --setup flag -> usage error, exit 2."""
+    rc = main([])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "path" in err or "setup" in err
+
+
+def test_main_llm_recursive_with_path(monkeypatch, capsys, tmp_path):
+    """--llm -r <dir> still works: path is not swallowed as a subcommand."""
+    (tmp_path / "a.py").write_text("if x == None:\n    pass\n")
+    monkeypatch.setattr("codereview.cli.ensure_model", lambda **kw: None)
+    rc = main(["--llm", "--recursive", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "a.py" in out
+
+
+def test_main_llm_parallel_workers_flag(monkeypatch, capsys, tmp_path):
+    """--workers is accepted and parallel review works with mocked LLM."""
+    (tmp_path / "a.py").write_text("if x == None:\n    pass\n")
+    (tmp_path / "b.py").write_text("result = []\nfor x in [1]:\n    result.append(x)\n")
+    monkeypatch.setattr("codereview.cli.ensure_model", lambda **kw: None)
+    monkeypatch.setattr("codereview.cli.review_with_llm",
+                        lambda *a, **k: [])
+    rc = main(["--llm", "--recursive", "--workers", "2", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "a.py" in out
+    assert "b.py" in out
+
+
+def test_main_llm_parallel_single_file(monkeypatch, capsys, tmp_path):
+    """Single file with --llm still works (sequential path)."""
+    (tmp_path / "a.py").write_text("if x == None:\n    pass\n")
+    monkeypatch.setattr("codereview.cli.ensure_model", lambda **kw: None)
+    monkeypatch.setattr("codereview.cli.review_with_llm",
+                        lambda *a, **k: [])
+    rc = main(["--llm", str(tmp_path / "a.py")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "a.py" in out
+
+
+def test_main_llm_skips_tiny_files(monkeypatch, capsys, tmp_path):
+    """Files under MIN_LLM_LINES don't call the LLM (no hallucination risk)."""
+    from codereview.cli import MIN_LLM_LINES
+    tiny = tmp_path / "tiny.py"
+    tiny.write_text('"""Docstring."""\nimport sys\n\nfrom x import main\n')
+    assert len(tiny.read_text().splitlines()) < MIN_LLM_LINES
+
+    called = []
+    monkeypatch.setattr("codereview.cli.ensure_model", lambda **kw: None)
+    monkeypatch.setattr("codereview.cli.review_with_llm",
+                        lambda *a, **k: called.append(a))
+    rc = main(["--llm", str(tiny)])
+    assert rc == 0
+    assert called == []  # LLM never invoked for tiny file

@@ -1,7 +1,9 @@
 # CodeReview Agent — In-Depth Design & Plan
 
-> Status: **Draft — pending review**
+> Status: **Implemented (static core + LLM adapter) — analytics pending**
 > Scope frozen: local-first, Pythonic + Low-Level-Design reviewer, CLI batch v1, JSONL analytics.
+> Static Pythonic + LLD detectors, CLI, `# noqa` suppression, the LLM adapter (§5, §12), and
+> tests are shipped. The analytics module (§7) is the remaining planned increment.
 
 ---
 
@@ -29,17 +31,17 @@ them to add **judgment**: idiomatic constructs and low-level design judgment.
                         +--------------------+---------------------+
                                              |
 +----------------+          +---------------v-----------------+
-|  analytics.ts  |<---------|   agent.py  (orchestrator)      |
-|  (JSONL log)   |          |   parse AST -> run detectors    |
-+----------------+          |   -> produce Report             |
-                            +---------------+-----------------+
+|  analytics.py  |<---------|  orchestrator.py  (review flow)  |
+|  (JSONL log)   |          |  parse AST -> run detectors     |
+|  (planned)     |          |  -> produce Report              |
++----------------+          +---------------+-----------------+
                                             |
                      +----------------+----+-----+-----------------+
                      |                |          |                 |
                      |   static      |          |        +---------v----------+
                      |   analyzers   |          |        |  llm/reviewer.py   |
                      |  (pure python)|          |        |  (optional, local) |
-                     |  ast-based    |                |   Ollama small model |
+                     |  ast-based    |          |        |   Ollama small model |
                      +----------------+          |   click-to-review mode |
                                                 +------------------------+
 ```
@@ -56,14 +58,14 @@ them to add **judgment**: idiomatic constructs and low-level design judgment.
 
 | Module | Path | Responsibility |
 |---|---|---|
-| CLI | `src/codereview/cli.py` | Arg parsing, file loading, formatting the report, `--llm` flag. |
-| Orchestrator | `src/codereview/agent.py` | Parse source to AST; run static analyzers; optionally run LLM; merge into one `Report`; emit analytics event. |
+| CLI | `src/codereview/cli.py` | Arg parsing, file loading, formatting the report, `--llm` flag (planned). |
+| Orchestrator | `src/codereview/orchestrator.py` | Parse source to AST; run static analyzers; optionally run LLM; merge into one `Report`; emit analytics event. |
 | Report model | `src/codereview/report.py` | `Severity`, `Issue`, `Report` dataclasses; dedupe & stats helpers. |
 | Shared rules | `src/codereview/rules.py` | Central registry of rule ids (`PY001`, `DES001`...), titles, severities, message templates. |
-| Pythonic analyzers | `src/codereview/analyzers/pythonic.py` | AST detectors for idiomatic Python (comprehensions, f-strings, `with`, `enumerate`, ...). |
-| Design analyzers | `src/codereview/analyzers/design.py` | AST detectors for LLD (class-size, `__init__` param count, naming, responsibility hints). |
-| LLM reviewer | `src/codereview/llm/reviewer.py` | Calls local model (via HTTP to Ollama); turns response into structured `Issue`s. |
-| Analytics | `src/codereview/analytics.py` | Appends JSONL events: usage, target kind (function/class/file), suggestions shown. |
+| Detector base | `src/codereview/analyzers/base.py` | `Detector` ABC + `WalkDetector` / `VisitorDetector` / `ScannerDetector` traversal bases. |
+| Detectors | `src/codereview/analyzers/detectors/` | One file per rule (comprehensions, f-strings, `with`, `enumerate`, large class, duplicated block/method, ...). |
+| LLM reviewer | `src/codereview/llm/reviewer.py` | Calls local model (via HTTP to Ollama); turns response into structured `Issue`s. **(planned)** |
+| Analytics | `src/codereview/analytics.py` | Appends JSONL events: usage, target kind (function/class/file), suggestions shown. **(planned)** |
 
 ---
 
@@ -99,7 +101,7 @@ The LLM is **not** a general "review everything" engine. Its role is narrow and 
 4. **Contract with static analyson:** LLM *authorises* the subjective question; static rules keep
    CLI-fast. LLM adds *design-level* judgement that rules cannot (tools, extensibility).
 5. **Privacy:** code is sent only to a local model bound to `localhost`. Default minimum model e.g.
-   `llama3/qwen2.5-coder:small`. The local model is optional; if absent, the tool degrades to
+   `deepseek-r1:7b`. The local model is optional; if absent, the tool degrades to
    static-only with an explicit banner.
 
 **Prompt design (later)**: slash prompt "Give 2 problematic ARrowed lines, be specific, no code. If code comments
@@ -126,7 +128,7 @@ Static analysis path has tight, near-zero cost and runs unconditionally. Fine.
 
 ---
 
-## 7. Analytics Design (JSONL)
+## 7. Analytics Design (JSONL) — **planned, not yet implemented**
 
 Goal: understand **how** the tool is used + which suggestions users see — not what the code is.
 
@@ -219,18 +221,18 @@ ship with v1.
 | 1 | Scaffolding: `pyproject.toml`, package dirs, `__init__` | S | ✅ |
 | 2 | `report.py` — models + dedupe | S | ✅ |
 | 3 | `rules.py` — registry | S | ✅ |
-| 4 | `analyzers/pythonic.py` — static Pythonic detectors **(Pythonic phase)** | M | ✅ |
-| 5 | `agent.py` — orchestrate + build Report (static path) | M | ✅ |
+| 4 | `analyzers/` — static Pythonic detectors **(Pythonic phase)** | M | ✅ |
+| 5 | `orchestrator.py` — orchestrate + build Report (static path) | M | ✅ |
 | 6 | `cli.py` — argparse + display | M | ✅ |
-| 7 | `analytics.py` — JSONL events | S | ✅ |
-| 8 | `llm/reviewer.py` — local-model adapter (flag-gated); Pythonic-only interpretation | M | later |
-| 9 | `tests/test_agent.py` + run pytest | M | ✅ |
-| 10 | `analyzers/design.py` — static LLD detectors **(LLD phase)** | M | later |
-| 11 | LLD CLI mode enforcing **one-file-at-a-time** | S | later |
+| 7 | `analytics.py` — JSONL events | S | ⏳ planned |
+| 8 | `llm/reviewer.py` — local-model adapter (flag-gated); Pythonic-only interpretation | M | ✅ |
+| 9 | `tests/` — pytest suite | M | ✅ |
+| 10 | `analyzers/detectors/` — static LLD detectors **(LLD phase)** | M | ✅ |
+| 11 | LLD CLI mode enforcing **one-file-at-a-time** | S | ⏳ planned |
 
-**Effort estimate:** core static + CLI + analytics (steps 1–7, 9) land as a working v0.5 quickly —
-Pythonic-only. The LLM adapter (8) is a separate increment; LLD (10–11) is gated behind the
-Pythonic phase per the cautious order.
+**Effort estimate:** the static core (steps 1–6, 9–10) and the LLM adapter (8) are shipped —
+Pythonic + LLD detectors, CLI, `# noqa` suppression, `--llm` flag, and tests. The analytics
+module (7) and the LLD CLI mode (11) are the remaining planned increments.
 
 ---
 
@@ -241,7 +243,7 @@ Pythonic phase per the cautious order.
 2. Analytics: do you want an `export`/`summary` subcommand to view counts
    (e.g. `codereview stats`)?
 3. FOr LLM, which local runtime do you target — **Ollama** (single binary, easy) vs
-   **llama.cpp** / **LM Studio**? Default proposal: Ollama.
+   **llama.cpp** / **LM Studio**? Default proposal: Ollama. **(still open — needed before §8)**
 
 ---
 
@@ -273,7 +275,7 @@ package, the local model is **fetched at runtime by the user**, never bundled.
      ```
      No local model runtime detected.
      → Install Ollama (https://ollama.com) then:
-         ollama pull qwen2.5-coder:1.5b
+         ollama pull deepseek-r1:7b
      ```
    - Present but model not pulled → same message, suggests the exact `ollama pull` command.
 4. Handler = `codereview setup` subcommand that automates the checks + prints the exact command.
@@ -291,7 +293,7 @@ package, the local model is **fetched at runtime by the user**, never bundled.
 
 | Bundled in package | Downloaded at runtime (user-host) | Never distributed |
 |---|---|---|
-| CLI, static analyzers, report, analytics | Small local model (`qwen2.5-coder:1.5b` ~1.5 GB) | Full 7B+ models, GPU toolchains, model weights in pip wheel |
+| CLI, static analyzers, report, analytics | Local model (`deepseek-r1:7b` ~5 GB) | Full 7B+ models, GPU toolchains, model weights in pip wheel |
 
 ### 12.6 Fallback path
 

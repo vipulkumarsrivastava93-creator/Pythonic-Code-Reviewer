@@ -75,6 +75,30 @@ report per file.
 | `-r`, `--recursive`, `--dir` | Treat `path` as a directory and review every `*.py` under it |
 | `--json` | Print the report as JSON (for scripting / CI) |
 | `--no-links` | Disable clickable links (plain `path:line` text) |
+| `--llm` | Also run an LLM review (local Ollama by default; see below) |
+| `--workers N` | With `--llm`, review up to `N` files in parallel (default 4). Ollama batches concurrent requests on the GPU, so this is nearly free |
+| `--setup` | Install the local LLM runtime + model (Ollama + `deepseek-r1:7b`), then exit |
+| `--yes` | Skip all confirmation prompts (for scripting / CI). Never downloads silently — it still prints what it is doing |
+
+### LLM review (`--llm`)
+
+Pass `--llm` to layer a subjective LLM review on top of the deterministic detectors. The LLM
+acts as the *interpreter*: it receives a compact AST summary + source and returns actionable
+suggestions (rule id `LLM001`), which are merged into the report and suppressible via
+`# noqa: LLM001`.
+
+```bash
+codereview --llm path/to/file.py
+```
+
+Each file is reviewed through **two lenses**: a *design* focus (class designs, structure) and a
+*logic* focus (correctness, edge cases). Findings from both are merged into one report.
+
+By default it talks to a **local** runtime (Ollama on `localhost:11434`) so code never leaves
+your machine. If no runtime is reachable, the tool prints a clear onboarding banner and degrades
+to static-only analysis.
+
+To use a remote OpenAI-compatible endpoint instead (Claude, GPT, ...), set the env vars below.
 
 ### Environment variables
 
@@ -83,6 +107,9 @@ report per file.
 | `CODEREVIEW_EDITOR` | `vscode` | Editor scheme for jump links. `vscode` → `vscode://file/...:line`; `file` → plain `file:///` links |
 | `CODEREVIEW_LINKS` | *(on)* | Set to `off` to disable OSC 8 hyperlinks (e.g. terminals that mangle them) |
 | `NO_COLOR` | *(off)* | Disable ANSI color output |
+| `CODEREVIEW_LLM_URL` | *(local Ollama)* | OpenAI-compatible chat-completions endpoint. Set to use a remote/local override |
+| `CODEREVIEW_LLM_API_KEY` | *(none)* | API key for a remote endpoint. If set without a URL, defaults to `https://api.openai.com/v1/chat/completions` |
+| `CODEREVIEW_LLM_MODEL` | `deepseek-r1:7b` | Model name sent to the endpoint |
 
 > Links are emitted **only in an interactive terminal** (`stdout` is a TTY). Piped output and CI
 > automatically get plain `path:line` text.
@@ -117,24 +144,28 @@ Notes:
 
 ---
 
-## Roadmap: on-device LLM review (planned)
+## LLM review (on-device by default)
 
-The static analyzers are instant and offline. The longer-term plan is to add a **small local
-model** for deeper, subjective review — running **entirely on your machine**, never sending code
-to any online AI platform. That privacy guarantee is the core of this tool.
+The static analyzers are instant and offline. The `--llm` flag layers a **subjective** review on
+top, running **entirely on your machine by default** — never sending code to any online AI
+platform unless you explicitly opt in with your own API key.
 
-The intended design (see `DESIGN.md`):
+How it works (see `DESIGN.md`):
 
-- A local runtime such as **Ollama** (or LM Studio) serves a small model like
-  `qwen2.5-coder:1.5b` over `localhost`.
+- A local runtime such as **Ollama** (or LM Studio) serves the reasoning
+  model `deepseek-r1:7b` over `localhost`.
 - Code is sent **only** to that local runtime — never to a hosted service.
 - The model is **opt-in**: if no local runtime is detected, the tool degrades to static-only
   analysis with a clear banner.
 - The model is **fetched by the user at runtime** (`ollama pull ...`), never bundled in the
   package.
+- `codereview --setup` automates the whole bootstrap: it installs Ollama (if missing) and pulls
+  `deepseek-r1:7b`, asking for explicit confirmation before any download.
+- To use a frontier model instead, set `CODEREVIEW_LLM_URL` + `CODEREVIEW_LLM_API_KEY` to any
+  OpenAI-compatible endpoint (Claude, GPT, ...).
 
-> **Privacy boundary:** no code ever leaves your machine. There is no online AI integration and
-> none is planned.
+> **Privacy boundary:** by default no code ever leaves your machine. Remote endpoints are used
+> only when you explicitly configure your own API key.
 
 ---
 
@@ -155,7 +186,10 @@ src/codereview/
   rules.py          # central rule registry (PY001…, DES001…)
   analyzers/        # AST detectors
     detectors/      # individual detectors (list comp, enumerate, nesting, …)
-  llm/              # (planned) local on-device model adapter (Ollama)
+  llm/              # local on-device model adapter (Ollama)
+    installer.py    # cross-platform Ollama install + model pull (user-confirmed)
+    reviewer.py     # OpenAI-compatible client, prompt building, response parsing
+    prompts.py      # centralized prompt templates (design/logic focuses)
 ```
 
 ---
@@ -163,9 +197,10 @@ src/codereview/
 ## Design notes
 
 - **Local-first & private.** Analysis runs entirely on your machine; no code is sent anywhere by
-  default. The planned LLM path uses a **local on-device model** (e.g. via Ollama) bound to
-  `localhost` — never an online AI platform.
+  default. The LLM path uses a **local on-device model** (`deepseek-r1:7b` via Ollama) bound to
+  `localhost` — never an online AI platform unless you opt in with your own API key.
 - **Fast.** Static analysis is a single `ast` pass with no network — well under 150 ms for a
-  1k-line file.
+  1k-line file. With `--llm`, files are reviewed in parallel (`--workers`), and Ollama batches
+  the concurrent requests on the GPU.
 - **Zero dependencies.** Everything uses the Python standard library.
 - See `DESIGN.md` for the full architecture, latency budget, and analytics plan.
