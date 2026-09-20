@@ -2,6 +2,7 @@ import ast
 import contextlib
 import io
 import json
+from pathlib import Path
 
 from codereview.cli import build_parser, display, main
 from codereview.report import Report
@@ -203,10 +204,13 @@ def test_main_setup_no_path_needed(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr("codereview.cli.ensure_model",
                         lambda **kw: calls.append(kw))
+    monkeypatch.setattr("codereview.cli.ensure_embed_model",
+                        lambda **kw: calls.append(kw))
     rc = main(["--setup"])
     assert rc == 0
-    assert calls == [{"yes": False, "force_menu": True,
-                      "announce": calls[0]["announce"]}]
+    assert calls[0] == {"yes": False, "force_menu": True,
+                         "announce": calls[0]["announce"]}
+    assert calls[1] == {"yes": False, "announce": calls[1]["announce"]}
     assert "Setup complete" in capsys.readouterr().out
 
 
@@ -214,10 +218,13 @@ def test_main_setup_yes_flag(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr("codereview.cli.ensure_model",
                         lambda **kw: calls.append(kw))
+    monkeypatch.setattr("codereview.cli.ensure_embed_model",
+                        lambda **kw: calls.append(kw))
     rc = main(["--setup", "--yes"])
     assert rc == 0
-    assert calls == [{"yes": True, "force_menu": True,
-                      "announce": calls[0]["announce"]}]
+    assert calls[0] == {"yes": True, "force_menu": True,
+                         "announce": calls[0]["announce"]}
+    assert calls[1] == {"yes": True, "announce": calls[1]["announce"]}
 
 
 def test_main_setup_declined_returns_1(monkeypatch, capsys):
@@ -225,6 +232,8 @@ def test_main_setup_declined_returns_1(monkeypatch, capsys):
     def decline(**kw):
         raise ModelInstallError("declined")
     monkeypatch.setattr("codereview.cli.ensure_model", decline)
+    monkeypatch.setattr("codereview.cli.ensure_embed_model",
+                        lambda **kw: None)
     rc = main(["--setup"])
     assert rc == 1
     assert "Setup incomplete" in capsys.readouterr().err
@@ -274,6 +283,31 @@ def test_main_llm_parallel_single_file(monkeypatch, capsys, tmp_path):
     assert "a.py" in out
 
 
+def test_main_rag_embed_implies_llm(monkeypatch, capsys, tmp_path):
+    """--rag-embed alone implies --llm (RAG is meaningless without the LLM)."""
+    # File must be above MIN_LLM_LINES so the LLM path actually runs.
+    (tmp_path / "a.py").write_text(
+        "def f(xs):\n"
+        "    result = []\n"
+        "    for x in xs:\n"
+        "        result.append(x)\n"
+        "    return result\n"
+        "\n"
+        "def g():\n"
+        "    return f([1, 2, 3])\n"
+        "\n"
+        "def h():\n"
+        "    return g()\n"
+    )
+    called = []
+    monkeypatch.setattr("codereview.cli.ensure_model", lambda **kw: None)
+    monkeypatch.setattr("codereview.cli.review_with_llm",
+                        lambda *a, **k: called.append(a) or [])
+    rc = main(["--rag-embed", str(tmp_path / "a.py")])
+    assert rc == 0
+    assert called != []  # LLM was invoked even without --llm
+
+
 def test_main_llm_skips_tiny_files(monkeypatch, capsys, tmp_path):
     """Files under MIN_LLM_LINES don't call the LLM (no hallucination risk)."""
     from codereview.cli import MIN_LLM_LINES
@@ -288,3 +322,43 @@ def test_main_llm_skips_tiny_files(monkeypatch, capsys, tmp_path):
     rc = main(["--llm", str(tiny)])
     assert rc == 0
     assert called == []  # LLM never invoked for tiny file
+
+
+# ---- export prompt ----
+
+def test_maybe_export_writes_file_when_yes(monkeypatch, tmp_path, capsys):
+    """User says yes -> findings written to codereview_findings.txt."""
+    from codereview.cli import _maybe_export
+    from codereview.report import Report, Issue, Category, Severity
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    monkeypatch.chdir(tmp_path)
+    report = Report(path="x.py")
+    report.add(Issue(code="PY001", category=Category.PYTHONIC,
+                     severity=Severity.SUGGESTION, message="Use a comp.", line=3))
+    _maybe_export([(Path("x.py"), report)])
+    out = (tmp_path / "codereview_findings.txt").read_text(encoding="utf-8")
+    assert "PY001" in out
+    assert "x.py" in out
+
+
+def test_maybe_export_noop_when_no(monkeypatch, tmp_path, capsys):
+    """User says no -> no file written."""
+    from codereview.cli import _maybe_export
+    from codereview.report import Report, Issue, Category, Severity
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    monkeypatch.chdir(tmp_path)
+    report = Report(path="x.py")
+    report.add(Issue(code="PY001", category=Category.PYTHONIC,
+                     severity=Severity.SUGGESTION, message="Use a comp.", line=3))
+    _maybe_export([(Path("x.py"), report)])
+    assert not (tmp_path / "codereview_findings.txt").exists()
+
+
+def test_maybe_export_noop_when_clean(monkeypatch, tmp_path, capsys):
+    """No findings -> no prompt, no file."""
+    from codereview.cli import _maybe_export
+    from codereview.report import Report
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    monkeypatch.chdir(tmp_path)
+    _maybe_export([(Path("x.py"), Report(path="x.py"))])
+    assert not (tmp_path / "codereview_findings.txt").exists()

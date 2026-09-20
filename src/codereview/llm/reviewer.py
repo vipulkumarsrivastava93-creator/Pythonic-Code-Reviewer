@@ -33,12 +33,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from codereview.llm.installer import DEFAULT_MODEL, ModelInstallError, pick_best_model
-from codereview.llm.prompts import SYSTEM_PROMPT, build_user_prompt
+from codereview.llm.prompts import (
+    CONSISTENCY_PROMPT,
+    SYSTEM_PROMPT,
+    build_user_prompt,
+)
 from codereview.report import Category, Issue, Severity
 
 # Rule id for LLM-sourced findings. Distinct from PY*/DES* so LLM findings are
 # identifiable and suppressible via `# noqa: LLM001`.
 LLM_RULE_CODE = "LLM001"
+# Rule id for the separate consistency-comparison path (--rag-embed).
+# Distinct so consistency findings are suppressible via `# noqa: LLM002`.
+LLM_RULE_CODE_CONSISTENCY = "LLM002"
 
 DEFAULT_LOCAL_URL = "http://localhost:11434/v1/chat/completions"  # Ollama
 
@@ -96,7 +103,8 @@ class LLMReviewer:
 
     def review(self, source: str, path: str = "<string>",
                static_issues: list[Issue] | None = None,
-               focus: str = "design") -> list[Issue]:
+               focus: str = "design",
+               related: str = "") -> list[Issue]:
         """Ask the model for suggestions on `source`; parse into `Issue`s.
 
         `static_issues` (optional) are the deterministic findings already
@@ -106,10 +114,14 @@ class LLMReviewer:
         `focus` selects the review lens: "design" (class designs) or
         "logic" (correctness/edge cases).
 
+        `related` (optional) is pre-rendered RAG context: related chunks
+        from the same codebase. Empty by default — the prompt is unchanged
+        when RAG is not in use.
+
         Raises `LLMError` if the runtime is unreachable or the response cannot
         be parsed. Returns an empty list when the model reports no improvement.
         """
-        prompt = _build_prompt(source, path, static_issues, focus)
+        prompt = _build_prompt(source, path, static_issues, focus, related)
         payload = self._post(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -120,6 +132,39 @@ class LLMReviewer:
         )
         content = _extract_content(payload)
         return _parse_suggestions(content, path, source, _stripped_lines(source))
+
+    def review_consistency(self, source: str, path: str = "<string>",
+                           related: str = "") -> list[Issue]:
+        """Compare `source` against its siblings; return deviations as LLM002.
+
+        A SEPARATE, focused task from `review()`: the model compares the
+        file against sibling code and reports ONLY concrete deviations. The
+        prompt is standalone (no review focus, no static issues) so the
+        sibling context cannot corrupt the normal review.
+
+        Returns an empty list when the model finds no deviations.
+        """
+        if not related:
+            return []
+        summary = _summarize(source)
+        body = _strip_imports(source)
+        prompt = CONSISTENCY_PROMPT.format(
+            path=path,
+            summary=summary,
+            related=related,
+            source=body,
+        )
+        payload = self._post(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=800,
+            temperature=0.2,
+        )
+        content = _extract_content(payload)
+        return _parse_suggestions(content, path, source, _stripped_lines(source),
+                                  code=LLM_RULE_CODE_CONSISTENCY)
 
     def _post(self, messages: list[dict], *, max_tokens: int, temperature: float = 0.0) -> dict:
         body = json.dumps({
@@ -175,17 +220,20 @@ def check_runtime() -> str | None:
 
 def review_with_llm(source: str, path: str = "<string>",
                     static_issues: list[Issue] | None = None,
-                    focuses: tuple[str, ...] = ("design", "logic")) -> list[Issue]:
+                    focuses: tuple[str, ...] = ("design", "logic"),
+                    related: str = "") -> list[Issue]:
     """Review `source` with the given focuses and merge the results.
 
     Runs one LLM call per focus (default: design + logic) and merges the
     findings. Each call is small and parallelizable, so running both is
     nearly free on GPU.
+
+    `related` (optional) is pre-rendered RAG context passed to each focus.
     """
     reviewer = LLMReviewer()
     merged: list[Issue] = []
     for focus in focuses:
-        merged.extend(reviewer.review(source, path, static_issues, focus))
+        merged.extend(reviewer.review(source, path, static_issues, focus, related))
     return merged
 
 
@@ -205,13 +253,17 @@ def _unreachable_message(url: str) -> str:
 
 def _build_prompt(source: str, path: str,
                   static_issues: list[Issue] | None = None,
-                  focus: str = "design") -> str:
+                  focus: str = "design",
+                  related: str = "") -> str:
     """Assemble the user prompt for a file review.
 
     Import statements and docstrings are stripped from the source (replaced
     with blank lines) so the model cannot comment on them — the static
     detectors already cover import placement, and a small model tends to
     fixate on imports and read docstrings as code.
+
+    `related` (optional) is pre-rendered RAG context injected into the
+    prompt so the model understands the file's role in the codebase.
     """
     summary = _summarize(source)
     body = _strip_imports(source)
@@ -221,6 +273,7 @@ def _build_prompt(source: str, path: str,
         source=body,
         static_issues=static_issues,
         focus=focus,
+        related=related,
     )
 
 
@@ -299,7 +352,8 @@ def _extract_content(payload: dict) -> str:
 
 
 def _parse_suggestions(content: str, path: str, source: str = "",
-                       stripped_lines: set[int] | None = None) -> list[Issue]:
+                       stripped_lines: set[int] | None = None,
+                       code: str = LLM_RULE_CODE) -> list[Issue]:
     """Parse the model's JSON into `Issue`s. Tolerant of markdown fences.
 
     Issues whose `line` does not point at a real statement in `source` are
@@ -309,6 +363,8 @@ def _parse_suggestions(content: str, path: str, source: str = "",
     Issues on `stripped_lines` (imports blanked out before sending) are also
     dropped: the model cannot see those lines, so any finding there is a
     hallucination.
+
+    `code` tags the findings (default LLM001; LLM002 for consistency).
 
     Robustness: small models frequently wrap the JSON in ```json fences, add
     trailing commas, or truncate the output at max_tokens. We handle all three:
@@ -321,7 +377,7 @@ def _parse_suggestions(content: str, path: str, source: str = "",
         data = json.loads(text)
     except json.JSONDecodeError:
         # Fall back to salvaging individual suggestion objects.
-        return _salvage_suggestions(content, source, stripped_lines)
+        return _salvage_suggestions(content, source, stripped_lines, code)
     if not isinstance(data, dict):
         return []  # not a JSON object -> nothing usable
     raw = data.get("suggestions", [])
@@ -343,7 +399,7 @@ def _parse_suggestions(content: str, path: str, source: str = "",
             continue  # hallucinated line number
         severity = _parse_severity(item.get("severity"))
         issues.append(Issue(
-            code=LLM_RULE_CODE,
+            code=code,
             category=Category.DESIGN,
             severity=severity,
             message=message.strip(),
@@ -383,7 +439,8 @@ def _fix_trailing_commas(text: str) -> str:
 
 
 def _salvage_suggestions(content: str, source: str,
-                         stripped_lines: set[int] | None = None) -> list[Issue]:
+                         stripped_lines: set[int] | None = None,
+                         code: str = LLM_RULE_CODE) -> list[Issue]:
     """Best-effort parse of truncated/malformed output via regex.
 
     Matches `{"line": N, "message": "...", "severity": "..."}` objects even
@@ -407,7 +464,7 @@ def _salvage_suggestions(content: str, source: str,
         if valid_lines and line not in valid_lines:
             continue
         issues.append(Issue(
-            code=LLM_RULE_CODE,
+            code=code,
             category=Category.DESIGN,
             severity=severity,
             message=message.strip(),
@@ -446,6 +503,7 @@ __all__ = [
     "LLMError",
     "LLMReviewer",
     "LLM_RULE_CODE",
+    "LLM_RULE_CODE_CONSISTENCY",
     "check_runtime",
     "review_with_llm",
 ]

@@ -210,6 +210,21 @@ def test_build_prompt_contains_source_and_summary():
     assert "suggestions" in prompt
 
 
+def test_build_prompt_passes_related_context():
+    """RAG context is injected into the prompt when provided."""
+    src = "x = 1\n"
+    prompt = _build_prompt(src, "test.py", related="  base.py: class VisitorDetector")
+    assert "Related code context" in prompt
+    assert "VisitorDetector" in prompt
+
+
+def test_build_prompt_omits_related_when_empty():
+    """No RAG context -> no related block (backwards compatible)."""
+    src = "x = 1\n"
+    prompt = _build_prompt(src, "test.py")
+    assert "Related code context (same codebase" not in prompt
+
+
 def test_build_prompt_strips_imports():
     """Import statements are removed from the source sent to the model."""
     src = "import os\nfrom pathlib import Path\n\nx = 1\n"
@@ -317,6 +332,37 @@ def test_prompts_logic_focus_mentions_correctness():
                                focus="logic")
     assert "correctness" in prompt
     assert "edge cases" in prompt
+
+
+def test_prompts_related_block_included_when_given():
+    from codereview.llm.prompts import build_user_prompt
+    prompt = build_user_prompt(path="x.py", summary="", source="x = 1\n",
+                               related="  base.py: class VisitorDetector")
+    assert "Related code context" in prompt
+    assert "VisitorDetector" in prompt
+
+
+def test_prompts_related_block_omitted_when_empty():
+    from codereview.llm.prompts import build_user_prompt
+    prompt = build_user_prompt(path="x.py", summary="", source="x = 1\n")
+    assert "Related code context (same codebase" not in prompt
+
+
+def test_prompts_related_rules_injected_when_related():
+    """Sibling-comparison rules appear only when related context is given."""
+    from codereview.llm.prompts import build_user_prompt
+    prompt = build_user_prompt(path="x.py", summary="", source="x = 1\n",
+                               related="  base.py: class VisitorDetector")
+    assert "SIBLING code" in prompt
+    assert "deviations from the siblings" in prompt
+
+
+def test_prompts_related_rules_absent_without_related():
+    """No related context -> no sibling rules (backwards compatible)."""
+    from codereview.llm.prompts import build_user_prompt
+    prompt = build_user_prompt(path="x.py", summary="", source="x = 1\n")
+    assert "SIBLING code" not in prompt
+    assert "deviations from the siblings" not in prompt
 
 
 def test_prompts_invalid_focus_raises():
@@ -474,6 +520,35 @@ def test_review_garbage_content_returns_empty(monkeypatch):
     assert r.review("x = 1\n", "x.py") == []
 
 
+def test_review_consistency_tags_llm002(monkeypatch):
+    """Consistency findings are tagged LLM002, distinct from LLM001."""
+    r = LLMReviewer()
+    payload = {"choices": [{"message": {"content": json.dumps({
+        "suggestions": [{"line": 2, "message": "X does A here, sibling Y does B.",
+                         "severity": "SUGGESTION"}]
+    })}}]}
+    monkeypatch.setattr(r, "_post", lambda *a, **k: payload)
+    issues = r.review_consistency("x = 1\ny = 2\n", "x.py", related="  y.py: class Y")
+    assert len(issues) == 1
+    assert issues[0].code == "LLM002"
+
+
+def test_review_consistency_no_related_returns_empty(monkeypatch):
+    """No sibling context -> no consistency call, no findings."""
+    r = LLMReviewer()
+    called = []
+    monkeypatch.setattr(r, "_post", lambda *a, **k: called.append(a))
+    assert r.review_consistency("x = 1\n", "x.py", related="") == []
+    assert called == []  # never hit the model
+
+
+def test_review_consistency_prompt_mentions_siblings(monkeypatch):
+    """The consistency prompt is a focused comparison task."""
+    from codereview.llm.prompts import CONSISTENCY_PROMPT
+    assert "SIBLING" in CONSISTENCY_PROMPT
+    assert "deviations" in CONSISTENCY_PROMPT.lower()
+
+
 def test_check_returns_none_when_reachable(monkeypatch):
     r = LLMReviewer()
     monkeypatch.setattr(r, "_post", lambda *a, **k: {"choices": []})
@@ -623,6 +698,65 @@ def test_ensure_model_pull_failure_raises(monkeypatch):
     monkeypatch.setattr("codereview.llm.installer.subprocess.run", boom)
     with pytest.raises(ModelInstallError):
         ensure_model(yes=True, announce=lambda m: None)
+
+
+# ---- embedding progress callback ----
+
+def test_embed_many_reports_progress(monkeypatch):
+    """embed_many invokes progress(done, total) after each text."""
+    from codereview.rag.embeddings import EmbeddingClient
+    client = EmbeddingClient()
+    monkeypatch.setattr(client, "embed", lambda t: [0.0] * 4)
+    calls = []
+    client.embed_many(["a", "b", "c"], progress=lambda d, t: calls.append((d, t)))
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_embed_many_no_progress_ok(monkeypatch):
+    """embed_many works without a progress callback."""
+    from codereview.rag.embeddings import EmbeddingClient
+    client = EmbeddingClient()
+    monkeypatch.setattr(client, "embed", lambda t: [0.0] * 4)
+    assert len(client.embed_many(["a", "b"])) == 2
+
+
+# ---- ensure_embed_model (installer module) ----
+
+def test_ensure_embed_model_already_installed(monkeypatch):
+    from codereview.llm.installer import ensure_embed_model
+    monkeypatch.setattr("codereview.llm.installer.ollama_installed", lambda: True)
+    monkeypatch.setattr("codereview.llm.installer.model_pulled", lambda m: True)
+    messages = []
+    ensure_embed_model(announce=messages.append)
+    assert any("already available" in m for m in messages)
+
+
+def test_ensure_embed_model_requires_ollama(monkeypatch):
+    from codereview.llm.installer import ModelInstallError, ensure_embed_model
+    monkeypatch.setattr("codereview.llm.installer.ollama_installed", lambda: False)
+    with pytest.raises(ModelInstallError):
+        ensure_embed_model(announce=lambda m: None)
+
+
+def test_ensure_embed_model_declines_download(monkeypatch):
+    from codereview.llm.installer import ModelInstallError, ensure_embed_model
+    monkeypatch.setattr("codereview.llm.installer.ollama_installed", lambda: True)
+    monkeypatch.setattr("codereview.llm.installer.model_pulled", lambda m: False)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    with pytest.raises(ModelInstallError):
+        ensure_embed_model(announce=lambda m: None)
+
+
+def test_ensure_embed_model_yes_pulls(monkeypatch):
+    from codereview.llm.installer import EMBED_MODEL, ensure_embed_model
+    calls = []
+    monkeypatch.setattr("codereview.llm.installer.ollama_installed", lambda: True)
+    monkeypatch.setattr("codereview.llm.installer.model_pulled", lambda m: False)
+    monkeypatch.setattr("codereview.llm.installer._ollama_binary", lambda: "ollama")
+    monkeypatch.setattr("codereview.llm.installer.subprocess.run",
+                        lambda *a, **k: calls.append(a[0]))
+    ensure_embed_model(yes=True, announce=lambda m: None)
+    assert calls == [["ollama", "pull", EMBED_MODEL]]
 
 
 # ---- _install_ollama platform dispatch (installer module) ----

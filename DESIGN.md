@@ -1,9 +1,10 @@
 # CodeReview Agent — In-Depth Design & Plan
 
-> Status: **Implemented (static core + LLM adapter) — analytics pending**
+> Status: **Implemented (static core + LLM adapter + RAG) — analytics pending**
 > Scope frozen: local-first, Pythonic + Low-Level-Design reviewer, CLI batch v1, JSONL analytics.
-> Static Pythonic + LLD detectors, CLI, `# noqa` suppression, the LLM adapter (§5, §12), and
-> tests are shipped. The analytics module (§7) is the remaining planned increment.
+> Static Pythonic + LLD detectors, CLI, `# noqa` suppression, the LLM adapter (§5, §12), RAG
+> cross-file context (§13.4), and tests are shipped. The analytics module (§7) is the remaining
+> planned increment.
 
 ---
 
@@ -44,6 +45,13 @@ them to add **judgment**: idiomatic constructs and low-level design judgment.
                      |  ast-based    |          |        |   Ollama small model |
                      +----------------+          |   click-to-review mode |
                                                 +------------------------+
+                     +----------------+          +------------------------+
+                     |  rag/          |<-------->|  llm/reviewer.py       |
+                     |  (codebase     |  related |  (consistency path,    |
+                     |   index:       |  chunks  |   LLM002, --rag-embed) |
+                     |  structural +  |          +------------------------+
+                     |  semantic)     |
+                     +----------------+
 ```
 
 ### Two processing paths
@@ -64,7 +72,8 @@ them to add **judgment**: idiomatic constructs and low-level design judgment.
 | Shared rules | `src/codereview/rules.py` | Central registry of rule ids (`PY001`, `DES001`...), titles, severities, message templates. |
 | Detector base | `src/codereview/analyzers/base.py` | `Detector` ABC + `WalkDetector` / `VisitorDetector` / `ScannerDetector` traversal bases. |
 | Detectors | `src/codereview/analyzers/detectors/` | One file per rule (comprehensions, f-strings, `with`, `enumerate`, large class, duplicated block/method, ...). |
-| LLM reviewer | `src/codereview/llm/reviewer.py` | Calls local model (via HTTP to Ollama); turns response into structured `Issue`s. **(planned)** |
+| LLM reviewer | `src/codereview/llm/reviewer.py` | Calls local model (via HTTP to Ollama); turns response into structured `Issue`s. |
+| RAG index | `src/codereview/rag/` | Hybrid codebase index: structural AST graph (imports/bases) + optional semantic embeddings. Feeds related chunks to the LLM. |
 | Analytics | `src/codereview/analytics.py` | Appends JSONL events: usage, target kind (function/class/file), suggestions shown. **(planned)** |
 
 ---
@@ -354,6 +363,28 @@ frontier "reviewers" miss.
 - **Monetization/Distribution friction** (§12): local model + CLI has adoption friction; the
   strongest product form is the *IDE click-to-review* advisor. CLI is the enabler/MVP, not the end
   goal.
+
+### 13.6 RAG cross-file context (implemented)
+
+The LLM reviews one file at a time, which invites hallucinated relationships between files it
+never saw. The `rag/` package fixes this with a **hybrid codebase index**:
+
+1. **Structural (always on, exact):** walk the AST once and build a symbol graph — what each file
+   imports, what classes inherit from what. Retrieval is deterministic and free.
+2. **Semantic (opt-in via `--rag-embed`):** embed every class/function with `nomic-embed-text`
+   and find *sibling* code by cosine similarity — classes that do the same job with the same
+   shape but share no import link.
+
+**Design decision — separate consistency path:** sibling context is *never* mixed into the normal
+review prompt (a 7b model pattern-matches on it and hallucinates). Instead, `--rag-embed` runs a
+**standalone comparison call** (rule `LLM002`) that reports only concrete deviations between a
+file and its siblings. Verified: 18/18 runs clean on consistent code — the focused prompt is
+stable where the general review prompt is not.
+
+**Known limits:** R1 at 7b is nondeterministic — the same file can yield "good code" one run and
+hallucinations the next, with or without RAG. Single-run validation is meaningless; judge by
+distribution. Embedding the codebase costs ~45s on first run (progress shown); structural RAG is
+instant.
 
 ### 13.5 One-line pitch (for the roadmap)
 

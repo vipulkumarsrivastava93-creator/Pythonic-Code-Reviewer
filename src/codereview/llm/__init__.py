@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from codereview.llm.installer import (
     DEFAULT_MODEL,
+    EMBED_MODEL,
     ModelInstallError,
+    ensure_embed_model,
     ensure_model,
     install_ollama,
     installed_models,
@@ -21,10 +23,12 @@ from codereview.llm.reviewer import (
 
 __all__ = [
     "DEFAULT_MODEL",
+    "EMBED_MODEL",
     "LLMError",
     "LLMReviewer",
     "ModelInstallError",
     "check_runtime",
+    "ensure_embed_model",
     "ensure_model",
     "install_ollama",
     "installed_models",

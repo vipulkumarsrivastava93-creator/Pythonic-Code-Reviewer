@@ -13,12 +13,25 @@ from codereview.orchestrator import OFFLINE
 from codereview.report import Report
 
 try:
-    from codereview.llm import LLMError, ModelInstallError, ensure_model, review_with_llm
+    from codereview.llm import (
+        LLMError,
+        ModelInstallError,
+        ensure_embed_model,
+        ensure_model,
+        review_with_llm,
+    )
 except ImportError:  # pragma: no cover - llm package is always present
     LLMError = None  # type: ignore[assignment,misc]
     ModelInstallError = None  # type: ignore[assignment,misc]
+    ensure_embed_model = None  # type: ignore[assignment]
     ensure_model = None  # type: ignore[assignment]
     review_with_llm = None  # type: ignore[assignment]
+
+try:
+    from codereview.rag import CodebaseIndex, render_related
+except ImportError:  # pragma: no cover - rag package is always present
+    CodebaseIndex = None  # type: ignore[assignment,misc]
+    render_related = None  # type: ignore[assignment]
 
 _RESET = "\x1b[0m"
 _BOLD_MAGENTA = "\x1b[1;35m"
@@ -36,6 +49,22 @@ _SEVERITY_COLORS = {
     "SUGGESTION": "\x1b[33m",
     "WARNING": "\x1b[1;31m",
 }
+
+
+def _common_root(paths: list[Path]) -> Path | None:
+    """Common parent directory of all paths (for the RAG index root).
+
+    Returns None when paths span different drives (no common root).
+    """
+    if not paths:
+        return None
+    try:
+        common = Path(paths[0]).resolve()
+        for p in paths[1:]:
+            common = Path(os.path.commonpath([str(common), str(Path(p).resolve())]))
+    except ValueError:
+        return None  # different drives
+    return common if common.is_dir() else common.parent
 
 
 def use_color() -> bool:
@@ -98,6 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workers", type=int, default=4,
                         help="With --llm: number of parallel LLM requests (default 4). "
                              "Ollama batches these on the GPU.")
+    parser.add_argument("--rag-embed", action="store_true",
+                        help="With --llm: enable semantic RAG retrieval (embeddings). "
+                             "Adds sibling-code findings but costs ~45s to index the "
+                             "codebase on first run. Off by default (structural only).")
     return parser
 
 
@@ -201,8 +234,17 @@ def _ensure_llm_ready(yes: bool) -> bool:
         return False
 
 
-def _review_one(path: Path, *, use_llm: bool) -> tuple[Path, Report] | tuple[Path, str]:
+def _review_one(path: Path, *, use_llm: bool, index=None,
+                rag_embed: bool = False) -> tuple[Path, Report] | tuple[Path, str]:
     """Review a single file: static always, LLM if requested.
+
+    `index` (optional) is a built `CodebaseIndex` for RAG context. When
+    present, related chunks are injected into the LLM prompt.
+
+    `rag_embed` (optional) enables the separate consistency-comparison path:
+    the file is compared against its siblings in a standalone LLM call
+    (tagged LLM002), merged into the report. The normal review stays clean
+    of sibling context.
 
     Returns (path, Report) on success, or (path, error_message) on failure.
     """
@@ -219,9 +261,17 @@ def _review_one(path: Path, *, use_llm: bool) -> tuple[Path, Report] | tuple[Pat
         if len(report.source.splitlines()) < MIN_LLM_LINES:
             return path, report
         try:
+            related = ""
+            if index is not None and render_related is not None:
+                related = render_related(index.related_for(str(path)))
             llm_issues = review_with_llm(report.source, str(path),
-                                         static_issues=report.issues)
+                                         static_issues=report.issues,
+                                         related="")  # normal review: no siblings
             report.extend(llm_issues)
+            if rag_embed and related:
+                # Separate consistency path: compare against siblings only.
+                consistency = _review_consistency(report.source, str(path), related)
+                report.extend(consistency)
             report.dedupe()
             report.sort()
         except LLMError as exc:
@@ -230,8 +280,22 @@ def _review_one(path: Path, *, use_llm: bool) -> tuple[Path, Report] | tuple[Pat
     return path, report
 
 
+def _review_consistency(source: str, path: str, related: str) -> list:
+    """Run the standalone consistency-comparison LLM call (LLM002).
+
+    Uses the same reviewer as the normal path but a separate prompt that
+    ONLY compares the file against its siblings. Returns [] on any failure
+    (best-effort; never blocks the review).
+    """
+    try:
+        from codereview.llm.reviewer import LLMReviewer
+        return LLMReviewer().review_consistency(source, path, related)
+    except Exception:
+        return []
+
+
 def _review_paths(paths: list[Path], *, links: bool, to_json: bool, use_llm: bool = False,
-                  yes: bool = False, workers: int = 4) -> int:
+                  yes: bool = False, workers: int = 4, rag_embed: bool = False) -> int:
     """Review each path, printing reports. Returns 0 if everything succeeds.
 
     Output order: clean files first, then files with findings, then a summary
@@ -243,19 +307,44 @@ def _review_paths(paths: list[Path], *, links: bool, to_json: bool, use_llm: boo
     In the parallel path, each file's report is printed as soon as it
     completes (streaming), so the user sees progress instead of waiting for
     all files to finish.
+
+    When `rag_embed` is set, the RAG index is built with embeddings (semantic
+    retrieval) in a background thread while static checks run. Without it,
+    the index is structural-only (inheritance/imports) and builds instantly.
     """
     failed = False
     llm_available = True
     reports: list[tuple[Path, Report]] = []
+    index = None
 
     if use_llm:
         llm_available = _ensure_llm_ready(yes)
+        if llm_available and CodebaseIndex is not None:
+            # Build the RAG index once over the common parent of all paths.
+            root = _common_root(paths)
+            if root is not None:
+                if rag_embed:
+                    # Background: embeddings take ~45s; overlap with static
+                    # checks instead of blocking before them.
+                    print("Building RAG index with embeddings (first run ~45s)...",
+                          file=sys.stderr)
+                    index = _build_index_async(root, progress=_embed_progress)
+                else:
+                    try:
+                        index = CodebaseIndex.build(root, embed=False)
+                    except Exception:
+                        index = None  # RAG is best-effort; never block review
 
     if use_llm and llm_available and len(paths) > 1 and workers > 1:
         # Parallel path: static review is instant; the LLM calls dominate.
         # Stream each file's report as it completes.
+        index = _await_index(index)
+        if rag_embed and index is not None:
+            print("Running consistency comparison against siblings...",
+                  file=sys.stderr)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_review_one, p, use_llm=True): p for p in paths}
+            futures = {pool.submit(_review_one, p, use_llm=True, index=index,
+                                   rag_embed=rag_embed): p for p in paths}
             for fut in as_completed(futures):
                 path, result = fut.result()
                 if isinstance(result, Report):
@@ -270,13 +359,24 @@ def _review_paths(paths: list[Path], *, links: bool, to_json: bool, use_llm: boo
                     failed = True
     else:
         # Sequential path (single file, no LLM, or LLM unavailable).
-        for path in paths:
-            result = _review_one(path, use_llm=use_llm and llm_available)
+        index = _await_index(index)
+        if rag_embed and index is not None:
+            print("Running consistency comparison against siblings...",
+                  file=sys.stderr)
+        total = len(paths)
+        for i, path in enumerate(paths, start=1):
+            if use_llm and llm_available and total > 1:
+                print(f"\r  Reviewing {i}/{total}: {path.name}...", end="",
+                      file=sys.stderr)
+            result = _review_one(path, use_llm=use_llm and llm_available,
+                                 index=index, rag_embed=rag_embed)
             if isinstance(result[1], Report):
                 reports.append((path, result[1]))
             else:
                 print(result[1], file=sys.stderr)
                 failed = True
+        if use_llm and llm_available and total > 1:
+            print(file=sys.stderr)
 
     if to_json:
         # JSON mode: print in deterministic path order (already streamed above
@@ -290,7 +390,43 @@ def _review_paths(paths: list[Path], *, links: bool, to_json: bool, use_llm: boo
         else:
             _print_summary([(p, r) for p, r in reports if not r.issues],
                            [(p, r) for p, r in reports if r.issues])
+
+    # After the review, offer to export findings to a test file.
+    if not to_json and not failed and sys.stdin.isatty():
+        _maybe_export(reports)
     return 1 if failed else 0
+
+
+def _maybe_export(reports: list[tuple[Path, Report]]) -> None:
+    """Ask the user if they want to export findings to a test file.
+
+    Only prompts in an interactive terminal (not piped/CI). Writes a
+    `codereview_findings.txt` in the current directory with one section per
+    file. Declining or Ctrl+C is a no-op.
+    """
+    dirty = [(p, r) for p, r in reports if r.issues]
+    if not dirty:
+        return
+    try:
+        answer = input(
+            f"\nExport {len(dirty)} file(s) with findings to "
+            "codereview_findings.txt? [y/N] "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if answer not in ("y", "yes"):
+        return
+    try:
+        with open("codereview_findings.txt", "w", encoding="utf-8") as fh:
+            for path, report in dirty:
+                fh.write(f"── {path} ──\n")
+                for issue in report.issues:
+                    fh.write(f"  {issue.code} {issue.severity} L{issue.line}: "
+                             f"{issue.message}\n")
+                fh.write("\n")
+        print(f"Exported {len(dirty)} file(s) to codereview_findings.txt")
+    except OSError as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
 
 
 def _print_grouped(reports: list[tuple[Path, Report]], *, links: bool) -> None:
@@ -339,8 +475,9 @@ def _cmd_setup(yes: bool) -> int:
         print("LLM package unavailable.", file=sys.stderr)
         return 1
     try:
-        ensure_model(yes=yes, force_menu=True,
-                    announce=lambda msg, **kw: print(msg, file=sys.stderr, **kw))
+        announce = lambda msg, **kw: print(msg, file=sys.stderr, **kw)
+        ensure_model(yes=yes, force_menu=True, announce=announce)
+        ensure_embed_model(yes=yes, announce=announce)
         print("Setup complete. Run 'codereview --llm <file>' to review with the LLM.")
         return 0
     except ModelInstallError as exc:
@@ -349,6 +486,58 @@ def _cmd_setup(yes: bool) -> int:
     except KeyboardInterrupt:
         print("\nSetup cancelled by user.", file=sys.stderr)
         return 1
+
+
+def _build_index_async(root: Path, progress=None):
+    """Build the RAG index with embeddings in a background thread.
+
+    Returns a future-like handle; the caller can poll `.done()` and call
+    `.result()` (which raises on failure) once ready. Embedding ~178 chunks
+    takes ~45s, so this overlaps with the static checks instead of blocking
+    before them.
+
+    `progress` (optional) is a callback `progress(done, total)` invoked
+    during embedding so the user sees progress.
+    """
+    from concurrent.futures import Future
+    from codereview.rag.embeddings import EmbeddingClient
+
+    future: Future = Future()
+
+    def _build() -> None:
+        try:
+            embedder = EmbeddingClient()
+            future.set_result(CodebaseIndex.build(root, embedder=embedder,
+                                                  embed=True, progress=progress))
+        except Exception as exc:  # RAG is best-effort; never block review
+            future.set_exception(exc)
+
+    import threading
+    threading.Thread(target=_build, daemon=True).start()
+    return future
+
+
+def _embed_progress(done: int, total: int) -> None:
+    """Print a simple progress line for embedding (e.g. '12/178 chunks')."""
+    print(f"\r  Embedded {done}/{total} chunks...", end="", file=sys.stderr)
+    if done >= total:
+        print(file=sys.stderr)
+
+
+def _await_index(index):
+    """Resolve the index: wait for an async build, or pass through a built one.
+
+    Returns the built `CodebaseIndex`, or None if the async build failed
+    (RAG is best-effort; review proceeds without it).
+    """
+    if index is None:
+        return None
+    if hasattr(index, "result"):  # a Future from _build_index_async
+        try:
+            return index.result()
+        except Exception:
+            return None
+    return index
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -362,6 +551,10 @@ def main(argv: list[str] | None = None) -> int:
         print("codereview: error: a path or --setup is required", file=sys.stderr)
         return 2
 
+    # --rag-embed is a modifier of --llm: it implies the LLM review, since
+    # RAG context is meaningless without the LLM to use it.
+    use_llm = args.llm or args.rag_embed
+
     raw = Path(args.path)
     if args.recursive:
         if not raw.is_dir():
@@ -372,14 +565,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"No .py files found under {raw}", file=sys.stderr)
             return 0
         return _review_paths(paths, links=not args.no_links, to_json=args.json,
-                             use_llm=args.llm, yes=args.yes, workers=args.workers)
+                             use_llm=use_llm, yes=args.yes, workers=args.workers,
+                             rag_embed=args.rag_embed)
 
     if not raw.is_file():
         print(f"Error: no such file: {raw}", file=sys.stderr)
         return 1
 
     return _review_paths([raw], links=not args.no_links, to_json=args.json,
-                         use_llm=args.llm, yes=args.yes, workers=args.workers)
+                         use_llm=use_llm, yes=args.yes, workers=args.workers,
+                         rag_embed=args.rag_embed)
 
 
 if __name__ == "__main__":

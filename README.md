@@ -77,8 +77,9 @@ report per file.
 | `--no-links` | Disable clickable links (plain `path:line` text) |
 | `--llm` | Also run an LLM review (local Ollama by default; see below) |
 | `--workers N` | With `--llm`, review up to `N` files in parallel (default 4). Ollama batches concurrent requests on the GPU, so this is nearly free |
-| `--setup` | Install the local LLM runtime + model (Ollama + `deepseek-r1:7b`), then exit |
+| `--setup` | Install the local LLM runtime + model (Ollama + `deepseek-r1:7b` + `nomic-embed-text`), then exit |
 | `--yes` | Skip all confirmation prompts (for scripting / CI). Never downloads silently — it still prints what it is doing |
+| `--rag-embed` | With `--llm` (or alone — implies it): enable semantic RAG retrieval. Adds sibling-code consistency findings (rule `LLM002`) but costs ~45s to embed the codebase on first run. Off by default (structural RAG only) |
 
 ### LLM review (`--llm`)
 
@@ -99,6 +100,24 @@ your machine. If no runtime is reachable, the tool prints a clear onboarding ban
 to static-only analysis.
 
 To use a remote OpenAI-compatible endpoint instead (Claude, GPT, ...), set the env vars below.
+
+### RAG context (`--rag-embed`)
+
+With `--llm`, the tool builds a **codebase index** (rule `LLM002`) so the model understands each
+file's role in the project:
+
+- **Structural (always on):** the AST graph — what each file imports and inherits from. Exact,
+  instant, no extra model needed.
+- **Semantic (with `--rag-embed`):** embeddings of every class/function, so the model can find
+  *sibling* code — other classes doing the same job with the same shape. Costs ~45s to embed on
+  first run (progress is shown).
+
+The consistency comparison runs as a **separate LLM call** (tagged `LLM002`, suppressible via
+`# noqa: LLM002`) so sibling context never corrupts the normal review. It reports only concrete
+deviations between a file and its siblings — never generic design advice.
+
+After a review with findings, the tool asks if you want to **export** them to
+`codereview_findings.txt` (interactive terminals only).
 
 ### Environment variables
 
@@ -190,6 +209,10 @@ src/codereview/
     installer.py    # cross-platform Ollama install + model pull (user-confirmed)
     reviewer.py     # OpenAI-compatible client, prompt building, response parsing
     prompts.py      # centralized prompt templates (design/logic focuses)
+  rag/              # retrieval-augmented generation (cross-file context)
+    chunking.py     # AST -> symbol chunks (Chunk, Chunker)
+    embeddings.py   # embedding client + cosine similarity
+    index.py        # hybrid index: structural graph + semantic vectors
 ```
 
 ---

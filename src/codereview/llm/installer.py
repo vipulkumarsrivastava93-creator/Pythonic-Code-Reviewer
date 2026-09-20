@@ -41,6 +41,11 @@ MODEL_CHOICES: dict[str, tuple[str, str]] = {
     "deepseek-r1:7b": ("~5 GB", "reasoning model — best design/logic judgment"),
 }
 
+# Embedding model for RAG (semantic retrieval). Small and separate from the
+# chat model — it only converts text to vectors, never generates.
+EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL_SIZE = "~274 MB"
+
 # Order of preference for auto-selecting the best installed model (largest last).
 _MODEL_RANK: dict[str, int] = {
     name: i for i, name in enumerate(MODEL_CHOICES)
@@ -136,6 +141,53 @@ def ensure_model(
         raise ModelInstallError("Ollama binary not found.") from exc
     announce(f"Model '{model}' installed.")
     _cleanup_smaller_models(model, announce)
+
+
+def ensure_embed_model(
+    *,
+    yes: bool = False,
+    confirm: bool = True,
+    announce: Any = print,
+) -> None:
+    """Ensure the RAG embedding model is available, asking before download.
+
+    Same flow as `ensure_model` but for the small embedding model
+    (`nomic-embed-text`). Never downloads silently: announces every step,
+    and asks for confirmation unless `yes=True`.
+
+    Raises:
+        ModelInstallError: user declined, or a required step was skipped.
+        KeyboardInterrupt: user pressed Ctrl+C during a download.
+    """
+    if not ollama_installed():
+        raise ModelInstallError(
+            "Ollama is not installed. Run 'codereview --setup' first."
+        )
+    if model_pulled(EMBED_MODEL):
+        announce(f"Embedding model '{EMBED_MODEL}' already available.")
+        return
+    announce(
+        f"Embedding model '{EMBED_MODEL}' is not downloaded yet.\n"
+        f"  Size: {EMBED_MODEL_SIZE}. Used for RAG semantic retrieval.\n"
+        f"  This will be downloaded to your machine and cached by Ollama."
+    )
+    if confirm and not yes:
+        answer = input("Download now? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            raise ModelInstallError("Embedding model download declined by user.")
+    announce(f"Downloading '{EMBED_MODEL}' (this may take a while)...")
+    binary = _ollama_binary()
+    if binary is None:
+        raise ModelInstallError("Ollama binary not found.")
+    try:
+        subprocess.run([binary, "pull", EMBED_MODEL], check=True)
+    except subprocess.CalledProcessError as exc:
+        raise ModelInstallError(
+            f"ollama pull failed (exit {exc.returncode})."
+        ) from exc
+    except FileNotFoundError as exc:
+        raise ModelInstallError("Ollama binary not found.") from exc
+    announce(f"Embedding model '{EMBED_MODEL}' installed.")
 
 
 def _select_model(*, yes: bool, confirm: bool, announce: Any) -> str:
