@@ -703,13 +703,13 @@ def test_ensure_model_pull_failure_raises(monkeypatch):
 # ---- embedding progress callback ----
 
 def test_embed_many_reports_progress(monkeypatch):
-    """embed_many invokes progress(done, total) after each text."""
+    """embed_many invokes progress(done, total) once per batch."""
     from codereview.rag.embeddings import EmbeddingClient
     client = EmbeddingClient()
     monkeypatch.setattr(client, "embed", lambda t: [0.0] * 4)
     calls = []
     client.embed_many(["a", "b", "c"], progress=lambda d, t: calls.append((d, t)))
-    assert calls == [(1, 3), (2, 3), (3, 3)]
+    assert calls == [(3, 3)]
 
 
 def test_embed_many_no_progress_ok(monkeypatch):
@@ -718,6 +718,14 @@ def test_embed_many_no_progress_ok(monkeypatch):
     client = EmbeddingClient()
     monkeypatch.setattr(client, "embed", lambda t: [0.0] * 4)
     assert len(client.embed_many(["a", "b"])) == 2
+
+
+def test_embed_many_empty_returns_empty(monkeypatch):
+    """embed_many([]) returns [] without hitting the network."""
+    from codereview.rag.embeddings import EmbeddingClient
+    client = EmbeddingClient()
+    monkeypatch.setattr(client, "embed", lambda t: (_ for _ in ()).throw(AssertionError))
+    assert client.embed_many([]) == []
 
 
 # ---- ensure_embed_model (installer module) ----
@@ -824,3 +832,75 @@ def test_download_writes_file(monkeypatch, tmp_path):
     _download("http://example.com/model", dest, lambda m, **k: None)
     with open(dest, "rb") as fh:
         assert fh.read() == b"hello"
+
+
+# ---- consistency pre-check (CodebaseIndex structural signature) ----
+
+def _build_index(tmp_path):
+    """Build a small index with two sibling detectors + one odd one out."""
+    from codereview.rag import CodebaseIndex
+    (tmp_path / "base.py").write_text(
+        "class Detector:\n"
+        "    pass\n"
+    )
+    (tmp_path / "a.py").write_text(
+        "from base import Detector\n"
+        "\n"
+        "class A(Detector):\n"
+        "    def run(self):\n"
+        "        return 1\n"
+    )
+    (tmp_path / "b.py").write_text(
+        "from base import Detector\n"
+        "\n"
+        "class B(Detector):\n"
+        "    def run(self):\n"
+        "        return 2\n"
+    )
+    (tmp_path / "c.py").write_text(
+        "from base import Detector\n"
+        "import json\n"
+        "\n"
+        "class C(Detector):\n"
+        "    def run(self):\n"
+        "        return json.dumps({})\n"
+    )
+    return CodebaseIndex.build(tmp_path, embed=False)
+
+
+def test_siblings_match_true_when_identical(tmp_path):
+    """Siblings with identical imports+bases -> skip the consistency call."""
+    idx = _build_index(tmp_path)
+    assert idx.siblings_match("a.py") is True
+    assert idx.siblings_match("b.py") is True
+
+
+def test_siblings_match_false_when_import_differs(tmp_path):
+    """A sibling with an extra import breaks the match -> run the LLM."""
+    idx = _build_index(tmp_path)
+    assert idx.siblings_match("c.py") is False
+
+
+def test_siblings_match_false_without_siblings(tmp_path):
+    """No siblings -> conservative False (run the LLM)."""
+    from codereview.rag import CodebaseIndex
+    (tmp_path / "solo.py").write_text("x = 1\n")
+    idx = CodebaseIndex.build(tmp_path, embed=False)
+    assert idx.siblings_match("solo.py") is False
+
+
+def test_structural_signature_contains_imports_and_bases(tmp_path):
+    """The signature is (imports, bases) — the file's structural pattern."""
+    idx = _build_index(tmp_path)
+    imports, bases = idx.structural_signature("a.py")
+    assert "base" in imports
+    assert "Detector" in bases
+
+
+def test_sibling_files_excludes_self(tmp_path):
+    """sibling_files returns other files sharing a base, never itself."""
+    idx = _build_index(tmp_path)
+    sibs = idx.sibling_files("a.py")
+    assert "a.py" not in sibs
+    assert "b.py" in sibs
+    assert "c.py" in sibs

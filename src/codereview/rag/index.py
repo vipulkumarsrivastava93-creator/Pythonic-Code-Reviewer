@@ -180,3 +180,60 @@ class CodebaseIndex:  # noqa: DES001 - cohesive: owns index data + retrieval
         own = set(chunk_indexes(path, self.chunks))
         return top_k_similar(query_vec, self.vectors, self.chunks,
                              exclude=own, seen=seen, top_k=top_k)
+
+    # ---- consistency pre-check ----
+
+    def structural_signature(self, path: str) -> tuple[frozenset[str], frozenset[str]]:
+        """The file's structural signature: (imports, base classes).
+
+        Two files with the same signature follow the same structural
+        pattern — same dependencies, same inheritance. Used to decide
+        whether a consistency LLM call is worth making.
+        """
+        imports = frozenset(self.imports.get(path, set()))
+        own = self._symbols_in(path)
+        bases = frozenset(
+            base
+            for name, base_names in self.bases.items()
+            if name in own
+            for base in base_names
+        )
+        return imports, bases
+
+    def sibling_files(self, path: str) -> set[str]:
+        """Files whose classes share a base class with `path` (siblings).
+
+        Siblings are the structural counterpart of the semantic neighbors:
+        classes that follow the same pattern (e.g. two detectors both
+        subclassing `VisitorDetector`). Excludes `path` itself.
+        """
+        own = self._symbols_in(path)
+        own_bases = {
+            base
+            for name, base_names in self.bases.items()
+            if name in own
+            for base in base_names
+        }
+        siblings: set[str] = set()
+        for name, base_names in self.bases.items():
+            if name in own or not (base_names & own_bases):
+                continue
+            chunk = self.symbols.get(name)
+            if chunk is not None and chunk.file != path:
+                siblings.add(chunk.file)
+        return siblings
+
+    def siblings_match(self, path: str) -> bool:
+        """True if the file's structural signature matches a sibling's.
+
+        If so, the file follows the same pattern as at least one sibling —
+        the consistency LLM call would almost certainly return no
+        deviations, so callers can skip it. Conservative: returns False
+        when there are no siblings or no sibling shares the signature
+        (run the LLM).
+        """
+        signature = self.structural_signature(path)
+        return any(
+            self.structural_signature(sib) == signature
+            for sib in self.sibling_files(path)
+        )

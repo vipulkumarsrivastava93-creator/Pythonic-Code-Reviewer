@@ -104,17 +104,50 @@ class EmbeddingClient:
 
     def embed_many(self, texts: list[str],
                    progress: Any = None) -> list[Vector]:
-        """Embed a list of texts. Falls back to one-by-one on failure.
+        """Embed a list of texts in ONE batched request.
+
+        Ollama's `/api/embed` accepts a list of inputs and returns a list of
+        embeddings — one round-trip instead of one per text. This is the
+        difference between ~45s and ~2s for a codebase index.
 
         `progress` (optional) is a callback `progress(done, total)` invoked
-        after each text is embedded, so callers can show progress.
+        after the batch completes, so callers can show progress.
         """
-        vectors: list[Vector] = []
-        total = len(texts)
-        for i, text in enumerate(texts, start=1):
-            vectors.append(self.embed(text))
-            if progress is not None:
-                progress(i, total)
+        if not texts:
+            return []
+        body = json.dumps({"model": self.model, "input": texts}).encode("utf-8")
+        req = urllib.request.Request(
+            self.url, data=body, headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise EmbeddingError(
+                f"Embedding endpoint returned HTTP {exc.code}: "
+                f"{exc.read().decode('utf-8', errors='replace')[:200]}"
+            ) from exc
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise EmbeddingError(
+                f"Embedding endpoint unreachable at {self.url}: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise EmbeddingError("Embedding endpoint returned non-JSON") from exc
+
+        # Ollama /api/embed returns {"embeddings": [[...], ...]}; the OpenAI
+        # /v1/embeddings shape is {"data": [{"embedding": [...]}, ...]}.
+        try:
+            if "embeddings" in payload:
+                vectors = payload["embeddings"]
+            else:
+                vectors = [d["embedding"] for d in payload["data"]]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise EmbeddingError(
+                "Embedding response missing 'embeddings' or 'data[].embedding'"
+            ) from exc
+        if progress is not None:
+            progress(len(vectors), len(texts))
         return vectors
 
 

@@ -381,10 +381,16 @@ review prompt (a 7b model pattern-matches on it and hallucinates). Instead, `--r
 file and its siblings. Verified: 18/18 runs clean on consistent code — the focused prompt is
 stable where the general review prompt is not.
 
+**Consistency pre-check (structural skip):** the consistency call costs ~10s per file, so before
+submitting it the tool compares the file's structural signature (imports + base classes) against
+its siblings'. If a sibling shares the exact same signature, the file follows the same pattern —
+the call is skipped (returns no findings). In this codebase 23/42 classes skip. The design and
+logic calls always run; only the consistency comparison is gated.
+
 **Known limits:** R1 at 7b is nondeterministic — the same file can yield "good code" one run and
 hallucinations the next, with or without RAG. Single-run validation is meaningless; judge by
-distribution. Embedding the codebase costs ~45s on first run (progress shown); structural RAG is
-instant.
+distribution. Embedding the codebase costs ~3s on first run (one batched request, progress
+shown); structural RAG is instant.
 
 ### 13.5 One-line pitch (for the roadmap)
 

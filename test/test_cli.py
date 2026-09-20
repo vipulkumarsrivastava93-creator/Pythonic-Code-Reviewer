@@ -324,6 +324,47 @@ def test_main_llm_skips_tiny_files(monkeypatch, capsys, tmp_path):
     assert called == []  # LLM never invoked for tiny file
 
 
+def test_main_consistency_skipped_when_siblings_match(monkeypatch, capsys, tmp_path):
+    """--rag-embed skips the consistency LLM call when siblings match."""
+    from codereview.cli import _review_consistency
+    (tmp_path / "base.py").write_text("class Detector:\n    pass\n")
+    (tmp_path / "a.py").write_text(
+        "from base import Detector\n"
+        "\n"
+        "class A(Detector):\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "def helper():\n"
+        "    return A().run()\n"
+        "\n"
+        "def main():\n"
+        "    return helper()\n"
+    )
+    (tmp_path / "b.py").write_text(
+        "from base import Detector\n"
+        "\n"
+        "class B(Detector):\n"
+        "    def run(self):\n"
+        "        return 2\n"
+        "\n"
+        "def helper():\n"
+        "    return B().run()\n"
+        "\n"
+        "def main():\n"
+        "    return helper()\n"
+    )
+    consistency_calls = []
+    monkeypatch.setattr("codereview.cli.ensure_model", lambda **kw: None)
+    monkeypatch.setattr("codereview.cli.review_with_llm",
+                        lambda *a, **k: [])
+    monkeypatch.setattr("codereview.cli._review_consistency",
+                        lambda *a, **k: consistency_calls.append(a) or [])
+    rc = main(["--rag-embed", str(tmp_path / "a.py")])
+    assert rc == 0
+    assert consistency_calls == []  # siblings match -> consistency skipped
+
+
 # ---- export prompt ----
 
 def test_maybe_export_writes_file_when_yes(monkeypatch, tmp_path, capsys):

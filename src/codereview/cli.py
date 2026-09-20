@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from codereview.orchestrator import OFFLINE
@@ -29,9 +31,13 @@ except ImportError:  # pragma: no cover - llm package is always present
 
 try:
     from codereview.rag import CodebaseIndex, render_related
+    from codereview.rag.embeddings import EmbeddingClient
+    from codereview.llm.reviewer import LLMReviewer
 except ImportError:  # pragma: no cover - rag package is always present
     CodebaseIndex = None  # type: ignore[assignment,misc]
     render_related = None  # type: ignore[assignment]
+    EmbeddingClient = None  # type: ignore[assignment]
+    LLMReviewer = None  # type: ignore[assignment]
 
 _RESET = "\x1b[0m"
 _BOLD_MAGENTA = "\x1b[1;35m"
@@ -264,14 +270,29 @@ def _review_one(path: Path, *, use_llm: bool, index=None,
             related = ""
             if index is not None and render_related is not None:
                 related = render_related(index.related_for(str(path)))
-            llm_issues = review_with_llm(report.source, str(path),
-                                         static_issues=report.issues,
-                                         related="")  # normal review: no siblings
+            # The 3 LLM calls (design, logic, consistency) are independent —
+            # run them concurrently so Ollama's GPU batching processes them
+            # together instead of sequentially (~3x faster per file).
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                f_design = pool.submit(review_with_llm, report.source, str(path),
+                                       report.issues, ("design",))
+                f_logic = pool.submit(review_with_llm, report.source, str(path),
+                                      report.issues, ("logic",))
+                f_consistency = None
+                if rag_embed and related:
+                    # Pre-check: if the file's structural signature (imports
+                    # + bases) matches its siblings' exactly, skip the
+                    # consistency LLM call — it would almost certainly
+                    # return no deviations. Saves ~10s per file.
+                    if index is not None and index.siblings_match(str(path)):
+                        f_consistency = pool.submit(lambda: [])
+                    else:
+                        f_consistency = pool.submit(_review_consistency,
+                                                    report.source, str(path), related)
+                llm_issues = f_design.result() + f_logic.result()
+                if f_consistency is not None:
+                    llm_issues += f_consistency.result()
             report.extend(llm_issues)
-            if rag_embed and related:
-                # Separate consistency path: compare against siblings only.
-                consistency = _review_consistency(report.source, str(path), related)
-                report.extend(consistency)
             report.dedupe()
             report.sort()
         except LLMError as exc:
@@ -288,7 +309,6 @@ def _review_consistency(source: str, path: str, related: str) -> list:
     (best-effort; never blocks the review).
     """
     try:
-        from codereview.llm.reviewer import LLMReviewer
         return LLMReviewer().review_consistency(source, path, related)
     except Exception:
         return []
@@ -496,12 +516,9 @@ def _build_index_async(root: Path, progress=None):
     takes ~45s, so this overlaps with the static checks instead of blocking
     before them.
 
-    `progress` (optional) is a callback `progress(done, total)` invoked
+>    `progress` (optional) is a callback `progress(done, total)` invoked
     during embedding so the user sees progress.
     """
-    from concurrent.futures import Future
-    from codereview.rag.embeddings import EmbeddingClient
-
     future: Future = Future()
 
     def _build() -> None:
@@ -512,7 +529,6 @@ def _build_index_async(root: Path, progress=None):
         except Exception as exc:  # RAG is best-effort; never block review
             future.set_exception(exc)
 
-    import threading
     threading.Thread(target=_build, daemon=True).start()
     return future
 
