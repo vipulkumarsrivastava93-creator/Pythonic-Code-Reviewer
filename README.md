@@ -119,6 +119,11 @@ as `.mypy_cache/` / `.pytest_cache/`). The cache is keyed by file mtimes — rep
 index in ~0.1s and skip embedding entirely; any changed file invalidates it and triggers a
 rebuild. Delete the folder to force a fresh index.
 
+The cache root is the **nearest project root** (walked up from the reviewed paths to the first
+`.git/`, `pyproject.toml`, `setup.py`, `setup.cfg`, or `requirements.txt`), so the cache lands in
+the same place regardless of how deep the reviewed paths are — and it travels with the project
+when you review someone else's codebase.
+
 The consistency comparison runs as a **separate LLM call** (tagged `LLM002`, suppressible via
 `# noqa: LLM002`) so sibling context never corrupts the normal review. It reports only concrete
 deviations between a file and its siblings — never generic design advice.

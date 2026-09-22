@@ -60,6 +60,12 @@ _SEVERITY_COLORS = {
 def _common_root(paths: list[Path]) -> Path | None:
     """Common parent directory of all paths (for the RAG index root).
 
+    Walks up from the common parent to the nearest project root marker
+    (`.git/`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements.txt`)
+    so the RAG cache lands at the repo root regardless of how deep the
+    reviewed paths are. Falls back to the plain common parent when no
+    marker is found.
+
     Returns None when paths span different drives (no common root).
     """
     if not paths:
@@ -70,7 +76,21 @@ def _common_root(paths: list[Path]) -> Path | None:
             common = Path(os.path.commonpath([str(common), str(Path(p).resolve())]))
     except ValueError:
         return None  # different drives
-    return common if common.is_dir() else common.parent
+    if not common.is_dir():
+        common = common.parent
+    return _nearest_project_root(common) or common
+
+
+_PROJECT_MARKERS = (".git", "pyproject.toml", "setup.py", "setup.cfg",
+                    "requirements.txt")
+
+
+def _nearest_project_root(start: Path) -> Path | None:
+    """Walk up from `start` to the nearest dir containing a project marker."""
+    for candidate in (start, *start.parents):
+        if any((candidate / marker).exists() for marker in _PROJECT_MARKERS):
+            return candidate
+    return None
 
 
 def use_color() -> bool:
@@ -261,37 +281,11 @@ def _review_one(path: Path, *, use_llm: bool, index=None,
     except OSError as exc:
         return path, f"Error reading {path}: {exc}"
 
-    if use_llm:
+    if use_llm and len(report.source.splitlines()) >= MIN_LLM_LINES:
         # Skip tiny files: nothing meaningful to review, and they invite
         # hallucinated findings (e.g. "missing main" on a docstring+import).
-        if len(report.source.splitlines()) < MIN_LLM_LINES:
-            return path, report
         try:
-            related = ""
-            if index is not None and render_related is not None:
-                related = render_related(index.related_for(str(path)))
-            # The 3 LLM calls (design, logic, consistency) are independent —
-            # run them concurrently so Ollama's GPU batching processes them
-            # together instead of sequentially (~3x faster per file).
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                f_design = pool.submit(review_with_llm, report.source, str(path),
-                                       report.issues, ("design",))
-                f_logic = pool.submit(review_with_llm, report.source, str(path),
-                                      report.issues, ("logic",))
-                f_consistency = None
-                if rag_embed and related:
-                    # Pre-check: if the file's structural signature (imports
-                    # + bases) matches its siblings' exactly, skip the
-                    # consistency LLM call — it would almost certainly
-                    # return no deviations. Saves ~10s per file.
-                    if index is not None and index.siblings_match(str(path)):
-                        f_consistency = pool.submit(lambda: [])
-                    else:
-                        f_consistency = pool.submit(_review_consistency,
-                                                    report.source, str(path), related)
-                llm_issues = f_design.result() + f_logic.result()
-                if f_consistency is not None:
-                    llm_issues += f_consistency.result()
+            llm_issues = _run_llm_calls(report, path, index, rag_embed)
             report.extend(llm_issues)
             report.dedupe()
             report.sort()
@@ -299,6 +293,44 @@ def _review_one(path: Path, *, use_llm: bool, index=None,
             return path, f"LLM unavailable: {exc}"
 
     return path, report
+
+
+def _run_llm_calls(report: Report, path: Path, index, rag_embed: bool) -> list:
+    """Run the design, logic, and (optionally) consistency LLM calls.
+
+    The calls are independent, so they run concurrently — Ollama's GPU
+    batching processes them together instead of sequentially (~3x faster
+    per file).
+    """
+    related = ""
+    if index is not None and render_related is not None:
+        related = render_related(index.related_for(str(path)))
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_design = pool.submit(review_with_llm, report.source, str(path),
+                               report.issues, ("design",))
+        f_logic = pool.submit(review_with_llm, report.source, str(path),
+                              report.issues, ("logic",))
+        f_consistency = _submit_consistency(pool, report, path, related,
+                                            index, rag_embed)
+        llm_issues = f_design.result() + f_logic.result()
+        if f_consistency is not None:
+            llm_issues += f_consistency.result()
+    return llm_issues
+
+
+def _submit_consistency(pool, report: Report, path: Path, related: str,
+                        index, rag_embed: bool):
+    """Submit the consistency call, or skip it when siblings match.
+
+    Pre-check: if the file's structural signature (imports + bases) matches
+    its siblings' exactly, skip the consistency LLM call — it would almost
+    certainly return no deviations. Saves ~10s per file.
+    """
+    if not (rag_embed and related):
+        return None
+    if index is not None and index.siblings_match(str(path)):
+        return pool.submit(lambda: [])
+    return pool.submit(_review_consistency, report.source, str(path), related)
 
 
 def _review_consistency(source: str, path: str, related: str) -> list:

@@ -398,6 +398,12 @@ shown); structural RAG is instant.
 any changed file invalidates it. This makes repeat `--rag-embed` runs near-instant, which is a
 prerequisite for the IDE click-to-review frontend (fires on file-open).
 
+**Cache root = nearest project root:** the cache directory is anchored to the first `.git/`,
+`pyproject.toml`, `setup.py`, `setup.cfg`, or `requirements.txt` found walking up from the
+reviewed paths (falling back to the plain common parent). This keeps the cache stable across
+invocation depths and per-project when reviewing other codebases — the cache travels with the
+project, never with the tool's install.
+
 ### 13.5 One-line pitch (for the roadmap)
 
 > *"Code works — is there a more Pythonic or better-designed way? Our agent focuses on exactly

@@ -4,7 +4,7 @@ import io
 import json
 from pathlib import Path
 
-from codereview.cli import build_parser, display, main
+from codereview.cli import _common_root, build_parser, display, main
 from codereview.report import Report
 
 
@@ -403,3 +403,47 @@ def test_maybe_export_noop_when_clean(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     _maybe_export([(Path("x.py"), Report(path="x.py"))])
     assert not (tmp_path / "codereview_findings.txt").exists()
+
+
+# ---- _common_root (RAG cache root) ----
+
+def test_common_root_walks_to_git_marker(tmp_path):
+    """A path deep in the tree resolves to the repo root (.git marker)."""
+    (tmp_path / ".git").mkdir()
+    deep = tmp_path / "src" / "pkg" / "mod.py"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("x = 1\n")
+    assert _common_root([deep]) == tmp_path.resolve()
+
+
+def test_common_root_walks_to_pyproject(tmp_path):
+    """pyproject.toml is also a project-root marker."""
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    deep = tmp_path / "a" / "b" / "c.py"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("x = 1\n")
+    assert _common_root([deep]) == tmp_path.resolve()
+
+
+def test_common_root_falls_back_to_common_parent(tmp_path):
+    """No marker -> plain common parent (previous behavior)."""
+    deep = tmp_path / "a" / "b" / "c.py"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("x = 1\n")
+    assert _common_root([deep]) == (tmp_path / "a" / "b").resolve()
+
+
+def test_common_root_multiple_paths_same_repo(tmp_path):
+    """Multiple paths in one repo share the same root."""
+    (tmp_path / ".git").mkdir()
+    p1 = tmp_path / "src" / "a.py"
+    p2 = tmp_path / "src" / "sub" / "b.py"
+    p1.parent.mkdir(parents=True)
+    p2.parent.mkdir(parents=True)
+    p1.write_text("x = 1\n")
+    p2.write_text("x = 1\n")
+    assert _common_root([p1, p2]) == tmp_path.resolve()
+
+
+def test_common_root_empty_returns_none():
+    assert _common_root([]) is None
