@@ -15,6 +15,9 @@ dist/
 htmlcov/
 .tox/
 
+# RAG index cache (regenerated on demand)
+.codereview/
+
 # Virtual environments
 .venv/
 venv/

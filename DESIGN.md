@@ -392,6 +392,12 @@ hallucinations the next, with or without RAG. Single-run validation is meaningle
 distribution. Embedding the codebase costs ~3s on first run (one batched request, progress
 shown); structural RAG is instant.
 
+**Index disk cache:** the built index (chunks + vectors + structural graph) is persisted to
+`.codereview/rag-index.json` in the project root, keyed by file mtimes — the same pattern as
+`.mypy_cache/` / `.pytest_cache/`. A cache hit loads in ~0.1s and skips embedding entirely;
+any changed file invalidates it. This makes repeat `--rag-embed` runs near-instant, which is a
+prerequisite for the IDE click-to-review frontend (fires on file-open).
+
 ### 13.5 One-line pitch (for the roadmap)
 
 > *"Code works — is there a more Pythonic or better-designed way? Our agent focuses on exactly

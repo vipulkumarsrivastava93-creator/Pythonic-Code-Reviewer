@@ -30,6 +30,7 @@ from typing import Any
 
 from codereview.rag._graph import class_bases, import_names, module_name
 from codereview.rag._semantic import chunk_vector, chunk_indexes, top_k_similar
+from codereview.rag.cache import load as cache_load, restore as cache_restore, save as cache_save
 from codereview.rag.chunking import Chunk, Chunker
 from codereview.rag.embeddings import EmbeddingClient
 
@@ -51,7 +52,8 @@ class CodebaseIndex:  # noqa: DES001 - cohesive: owns index data + retrieval
 
     @classmethod
     def build(cls, root: str | Path, *, embedder: EmbeddingClient | None = None,
-              embed: bool = True, progress: Any = None) -> "CodebaseIndex":
+              embed: bool = True, progress: Any = None,
+              use_cache: bool = True) -> "CodebaseIndex":
         """Build an index over every `.py` file under `root`.
 
         - Chunks are extracted structurally (no embedding needed).
@@ -60,10 +62,27 @@ class CodebaseIndex:  # noqa: DES001 - cohesive: owns index data + retrieval
           runtime), the index still works structurally — graceful degrade.
         - `progress` (optional) is a callback `progress(done, total)` invoked
           during embedding so callers can show progress.
+        - `use_cache` (default True) persists the index to
+          `.codereview/rag-index.json` in the project root and reloads it
+          when no file has changed (keyed by mtimes). A cache hit skips
+          chunking AND embedding — instant repeat runs.
         """
         root = Path(root)
         index = cls()
         chunker = Chunker()
+        files = sorted(str(p.relative_to(root)) for p in root.rglob("*.py"))
+        if use_cache:
+            cached = cache_load(root, files)
+            if cached is not None:
+                chunks, vectors, imports, bases, module_files = cache_restore(cached)
+                index.chunks = chunks
+                index.vectors = vectors
+                index.imports = imports
+                index.bases = bases
+                index.module_files = module_files
+                for chunk in chunks:
+                    index.symbols[chunk.symbol] = chunk
+                return index
         for path in sorted(root.rglob("*.py")):
             index._index_file(path, root, chunker)
         if embed and embedder is not None:
@@ -75,6 +94,10 @@ class CodebaseIndex:  # noqa: DES001 - cohesive: owns index data + retrieval
             except Exception:
                 # No embedding runtime -> structural-only index.
                 index.vectors = []
+        if use_cache:
+            cache_save(root, files=files, chunks=index.chunks,
+                       vectors=index.vectors, imports=index.imports,
+                       bases=index.bases, module_files=index.module_files)
         return index
 
     def _index_file(self, path: Path, root: Path, chunker: Chunker) -> None:

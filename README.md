@@ -114,6 +114,11 @@ file's role in the project:
   *sibling* code — other classes doing the same job with the same shape. Embeddings are sent in
   one batched request (~3s for the whole codebase, progress shown).
 
+The index is **disk-cached** to `.codereview/rag-index.json` in the project root (same pattern
+as `.mypy_cache/` / `.pytest_cache/`). The cache is keyed by file mtimes — repeat runs load the
+index in ~0.1s and skip embedding entirely; any changed file invalidates it and triggers a
+rebuild. Delete the folder to force a fresh index.
+
 The consistency comparison runs as a **separate LLM call** (tagged `LLM002`, suppressible via
 `# noqa: LLM002`) so sibling context never corrupts the normal review. It reports only concrete
 deviations between a file and its siblings — never generic design advice.

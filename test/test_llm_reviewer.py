@@ -15,6 +15,7 @@ from codereview.llm.reviewer import (
     _parse_suggestions,
     _summarize,
 )
+from codereview.rag import CodebaseIndex
 from codereview.report import Category, Severity
 
 
@@ -838,7 +839,6 @@ def test_download_writes_file(monkeypatch, tmp_path):
 
 def _build_index(tmp_path):
     """Build a small index with two sibling detectors + one odd one out."""
-    from codereview.rag import CodebaseIndex
     (tmp_path / "base.py").write_text(
         "class Detector:\n"
         "    pass\n"
@@ -904,3 +904,60 @@ def test_sibling_files_excludes_self(tmp_path):
     assert "a.py" not in sibs
     assert "b.py" in sibs
     assert "c.py" in sibs
+
+
+# ---- RAG index disk cache ----
+
+def test_cache_roundtrip_identical(tmp_path):
+    """A cached build returns an identical index (chunks, graph, symbols)."""
+    idx1 = _build_index(tmp_path)
+    idx2 = CodebaseIndex.build(tmp_path, embed=False)  # cache hit
+    assert [c.symbol for c in idx1.chunks] == [c.symbol for c in idx2.chunks]
+    assert idx1.imports == idx2.imports
+    assert idx1.bases == idx2.bases
+    assert idx1.module_files == idx2.module_files
+    assert idx1.symbols.keys() == idx2.symbols.keys()
+
+
+def test_cache_written_to_dot_codereview(tmp_path):
+    """The cache lands in <root>/.codereview/rag-index.json."""
+    _build_index(tmp_path)
+    assert (tmp_path / ".codereview" / "rag-index.json").exists()
+
+
+def test_cache_invalidated_on_file_change(tmp_path):
+    """Touching a file invalidates the cache (mtime mismatch)."""
+    _build_index(tmp_path)
+    (tmp_path / "a.py").write_text(
+        "from base import Detector\n"
+        "\n"
+        "class A(Detector):\n"
+        "    def run(self):\n"
+        "        return 99\n"  # changed
+    )
+    idx = CodebaseIndex.build(tmp_path, embed=False)
+    assert len(idx.chunks) == 4  # rebuilt (4 files), not stale
+    assert idx.symbols["A"].body == "methods: run(self)"  # fresh content
+
+
+def test_cache_invalidated_on_new_file(tmp_path):
+    """Adding a file changes the file set -> cache is stale."""
+    _build_index(tmp_path)
+    (tmp_path / "d.py").write_text("x = 1\n")
+    idx = CodebaseIndex.build(tmp_path, embed=False)
+    assert len(idx.chunks) == 4  # includes the new file
+
+
+def test_cache_corrupt_returns_none(tmp_path):
+    """Corrupt JSON -> load returns None (caller rebuilds)."""
+    from codereview.rag.cache import load
+    _build_index(tmp_path)
+    cache_file = tmp_path / ".codereview" / "rag-index.json"
+    cache_file.write_text("not json", encoding="utf-8")
+    assert load(tmp_path, ["a.py", "b.py", "base.py"]) is None
+
+
+def test_cache_use_cache_false_skips_disk(tmp_path):
+    """use_cache=False never writes the cache file."""
+    CodebaseIndex.build(tmp_path, embed=False, use_cache=False)
+    assert not (tmp_path / ".codereview" / "rag-index.json").exists()
