@@ -15,6 +15,11 @@ dist/
 htmlcov/
 .tox/
 
+# Stray test output files
+llm_test_out.txt
+test_output.txt
+codereview_findings.txt
+
 # RAG index cache (regenerated on demand)
 .codereview/
 
