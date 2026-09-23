@@ -49,6 +49,12 @@ pip install -e .
 This installs the `codereview` console command. (You can also run it without installing via
 `python -m codereview`, which works from the project root.)
 
+### VS Code extension
+
+There's also a **VS Code extension** (`vscode-extension/`) that runs the CLI on save and shows
+findings in the Problems panel. See [`vscode-extension/README.md`](vscode-extension/README.md)
+for setup and development instructions.
+
 ---
 
 ## Usage

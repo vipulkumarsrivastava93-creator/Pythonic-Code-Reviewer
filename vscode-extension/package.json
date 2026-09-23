@@ -1,0 +1,69 @@
+{
+  "name": "codereview",
+  "displayName": "Python Code Reviewer",
+  "description": "Local Pythonic + design code review. Runs the codereview CLI on save and shows findings in the Problems panel.",
+  "version": "0.1.0",
+  "publisher": "vipulkumarsrivastava93",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "python",
+    "linter",
+    "code review",
+    "ast",
+    "pythonic"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codereview.reviewFile",
+        "title": "Code Review: Review Current File"
+      },
+      {
+        "command": "codereview.clearFindings",
+        "title": "Code Review: Clear Findings"
+      }
+    ],
+    "configuration": {
+      "title": "Code Review",
+      "properties": {
+        "codereview.cliPath": {
+          "type": "string",
+          "default": "codereview",
+          "description": "Path to the codereview CLI executable. Defaults to 'codereview' on PATH."
+        },
+        "codereview.reviewOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the static review automatically when a Python file is saved."
+        },
+        "codereview.llmOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also run the LLM review on save. WARNING: slow (10-30s per file). Prefer the CodeLens click-to-review instead."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
